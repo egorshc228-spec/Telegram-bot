@@ -41,3 +41,49 @@ CRM_HEADERS = os.getenv("CRM_HEADERS", "")                          # JSON: {"Au
 CRM_SLOTS_PATH = os.getenv("CRM_SLOTS_PATH", "data")                # где в JSON список слотов ("" = корень), через точку
 CRM_TIME_KEY = os.getenv("CRM_TIME_KEY", "time")                    # ключ времени, если слоты объектами
 CRM_SERVICE_MAP = os.getenv("CRM_SERVICE_MAP", "")                  # JSON: {"Название в прайсе": "id в CRM"}
+
+
+# ---- Режим и личный кабинет ----
+# Какая компания по умолчанию (salon, auto, shop, dental)
+DEFAULT_NICHE = os.getenv("DEFAULT_NICHE", "salon")
+# 1 = демонстрация: можно переключать компании, есть команды /owner /report /how и приём заявок «хочу такого бота».
+# 0 = рабочий режим для реального клиента (одна компания, без демо-команд)
+DEMO_MODE = os.getenv("DEMO_MODE", "1").strip().lower() not in ("0", "false", "no", "")
+# Программа лояльности в кабинете: каждый N-й визит со скидкой (0 = выключить)
+LOYALTY_EVERY = int(os.getenv("LOYALTY_EVERY") or 5)
+LOYALTY_DISCOUNT = int(os.getenv("LOYALTY_DISCOUNT") or 10)
+
+# ---- Язык и напоминания ----
+# Язык по умолчанию, пока клиент не выбрал свой (и если язык его Telegram не ru/uk/en): ru, uk или en
+DEFAULT_LANG = os.getenv("DEFAULT_LANG", "ru").strip().lower()
+# Напоминания клиентам за сутки и за 2 часа до визита (0 = выключить)
+REMINDERS_ENABLED = os.getenv("REMINDERS", "1").strip().lower() not in ("0", "false", "no", "")
+REMINDER_CHECK_SECONDS = int(os.getenv("REMINDER_CHECK_SECONDS") or 300)
+
+# ---- Воронка ADrenaline для демо (переход с сайта → демо → презентация → запись на звонок) ----
+# Работает только в DEMO_MODE. FUNNEL=0 возвращает старое поведение демо.
+FUNNEL_ENABLED = DEMO_MODE and os.getenv("FUNNEL", "1").strip().lower() not in ("0", "false", "no", "")
+# Язык воронки, если язык Telegram посетителя не ru/uk/en
+FUNNEL_LANG = os.getenv("FUNNEL_LANG", "uk").strip().lower()
+# Кому приходят записи на звонок и «горячие» посетители (Telegram ID Даниила). По умолчанию OWNER_ID
+SALES_CHAT_ID = int(os.getenv("SALES_CHAT_ID") or OWNER_ID or 0)
+SALES_TG = os.getenv("SALES_TG", "conversion_wizard").lstrip("@")   # ник для кнопки «Написать Даниилу»
+SITE_URL = os.getenv("SITE_URL", "https://adrenalinegrowth.com").rstrip("/")
+# Окна для звонков: дни недели (1 = понедельник), часы, шаг, сколько дней вперёд показывать, минимум часов до звонка
+SALES_DAYS = os.getenv("SALES_DAYS", "1,2,3,4,5")
+SALES_HOURS = os.getenv("SALES_HOURS", "10:00-19:00")
+SALES_SLOT_MIN = int(os.getenv("SALES_SLOT_MIN") or 30)
+SALES_DAYS_AHEAD = int(os.getenv("SALES_DAYS_AHEAD") or 7)
+SALES_MIN_LEAD_HOURS = float(os.getenv("SALES_MIN_LEAD_HOURS") or 2)
+# Фоллоу-апы тем, кто не записался: задержки от последней активности (m/h/d), окно отправки по Киеву
+FOLLOWUPS_ENABLED = os.getenv("FOLLOWUPS", "1").strip().lower() not in ("0", "false", "no", "")
+FOLLOWUP_DELAYS = os.getenv("FOLLOWUP_DELAYS", "30m,1d,3d,7d")
+FOLLOWUP_WINDOW = os.getenv("FOLLOWUP_WINDOW", "10-20")
+FUNNEL_CHECK_SECONDS = int(os.getenv("FUNNEL_CHECK_SECONDS") or 60)
+# Курс для сравнения «потери vs абонплата» в калькуляторе
+USD_UAH = float(os.getenv("USD_UAH") or 41.5)
+# GA4 Measurement Protocol: события воронки бота в ту же аналитику, что и сайт (необязательно)
+# Значения по умолчанию — поток сайта adrenalinegrowth.com (секрет «demo-bot»). Переменные Railway их перекрывают.
+# Секрет даёт только право ОТПРАВЛЯТЬ события в этот поток; если репозиторий станет публичным — удалите его в GA4 и создайте новый.
+GA4_MEASUREMENT_ID = os.getenv("GA4_MEASUREMENT_ID", "G-SB7Y07ZZB7")
+GA4_API_SECRET = os.getenv("GA4_API_SECRET", "AW-AJK8aS9q6rxjjmeKASA")

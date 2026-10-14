@@ -1,5 +1,6 @@
 """Интеграции с CRM на подменённом HTTP (без сети). python -m tests.test_booking"""
 import asyncio, json, os, tempfile
+os.environ["GA4_API_SECRET"] = ""  # тесты не шлют события в настоящий GA4
 os.environ["DATA_DIR"] = tempfile.mkdtemp()
 import httpx
 from datetime import date
@@ -130,12 +131,12 @@ async def test_cache_and_days():
     await booking.free_slots_days("salon", None, days)
     assert n["c"] == 5, "второй вызов должен идти из кэша"
     # промпт ИИ получает слоты из CRM
-    sysmsg = await ai.build_system("salon")
+    sysmsg = await ai.dynamic_system("salon", {}, [])
     assert "10:00" in sysmsg
     # когда CRM лежит, ИИ не выдумывает время
     booking.provider("salon").transport = httpx.MockTransport(lambda r: httpx.Response(500))
     booking._cache.clear()
-    assert "недоступно" in await ai.build_system("salon")
+    assert "недоступно" in await ai.dynamic_system("salon", {}, [])
     booking.setup({})
 
 
