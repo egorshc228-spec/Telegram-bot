@@ -85,5 +85,5 @@ USD_UAH = float(os.getenv("USD_UAH") or 41.5)
 # GA4 Measurement Protocol: события воронки бота в ту же аналитику, что и сайт (необязательно)
 # Значения по умолчанию — поток сайта adrenalinegrowth.com (секрет «demo-bot»). Переменные Railway их перекрывают.
 # Секрет даёт только право ОТПРАВЛЯТЬ события в этот поток; если репозиторий станет публичным — удалите его в GA4 и создайте новый.
-GA4_MEASUREMENT_ID = os.getenv("GA4_MEASUREMENT_ID", "G-SB7Y07ZZB7")
-GA4_API_SECRET = os.getenv("GA4_API_SECRET", "AW-AJK8aS9q6rxjjmeKASA")
+GA4_MEASUREMENT_ID = os.getenv("GA4_MEASUREMENT_ID", "")
+GA4_API_SECRET = os.getenv("GA4_API_SECRET", "")
