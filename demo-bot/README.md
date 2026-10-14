@@ -156,3 +156,5 @@ tests/           python -m tests.test_demo ; tests.test_flow ; tests.test_bookin
 - Напоминания (`app/reminders.py`): за сутки и за 2 часа до визита, на языке клиента. Если запись сделана
   впритык, лишнее напоминание пропускается. Отменённым и отклонённым записям не шлём. В демо: `/reminder`.
 - Тесты: `python -m tests.test_demo`, `python -m tests.test_i18n`, `python -m tests.test_flow`, `python -m tests.test_booking`.
+
+update
