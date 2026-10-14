@@ -131,8 +131,9 @@ async def main():
                                     name="Олена", phone="0501234567"), say("Записала вас!"))
     await feed(msg("запишіть мене на стрижку", V))
     assert to(V.id, "Записала вас")
-    nudge = last(V.id)
-    assert "щойно записались" in nudge["text"] and ("👀 Очима власника", "fo:owner") in buttons(nudge)
+    assert to(V.id, "щойно записались")
+    auto = to(V.id, "Так заявка приходить вам")      # его собственная заявка показывается сразу, без кнопки
+    assert auto and "Олена" in auto[-1]["text"]
     p = await sales.get(V.id)
     assert p["demo_booked"] == 1 and p["demo_msgs"] == 1
 
@@ -145,6 +146,19 @@ async def main():
     assert (await sales.get(V.id))["owner_seen"] == 1
     await feed(cbq("fo:report", V))
     assert any(x["m"] == "SendDocument" for x in SENT[-3:])
+
+    # 4b. ИИ написал «записані», не вызвав create_lead → ответ не уходит клиенту, модель создаёт запись
+    slot2 = free_slots("salon", day)[1]
+    ai.client = ScriptedClient(say("Готово! Ви записані на завтра."),
+                               tool("create_lead", service="Женская стрижка", date=day.isoformat(), time=slot2,
+                                    name="Олена", phone="0501234567"),
+                               say("Записала вас, запис №2."))
+    n_before = len(to(V.id))
+    await feed(msg("так, все вірно", V))
+    new = [x["text"] or "" for x in to(V.id)[n_before:]]
+    assert not any("Готово! Ви записані" in t for t in new) and any("№2" in t for t in new), new
+    assert any("НЕ создана" in str(mm["content"]) for mm in ai.client.calls[1]["messages"])
+    assert ai.claims_booking("Вы записаны на 16.10") and not ai.claims_booking("На какое время вас записать?")
 
     # 5. презентация: 6 экранов, калькулятор на 3-м
     await feed(cbq("fpn:0", V))
@@ -196,7 +210,7 @@ async def main():
     # 7. Даниил получает карточку со всем контекстом и подтверждает
     sc = to(SALES, "Запись на звонок")[-1]["text"]
     for part in ("olena_salon", "Салон", "10–30", "500–1 500", "Администратор", "18 000", "сайт /ai-admin",
-                 "GA связан", "записался ✅", "презентация 6/6"):
+                 "GA связан", "записался как клиент ✅", "презентация 6/6"):
         assert part in sc, (part, sc)
     await feed(cbq(f"sc:ok:{c['id']}", V))           # чужая кнопка — отказ
     assert (await sales.get_call(c["id"]))["status"] == "booked"
@@ -290,6 +304,7 @@ async def main():
     if not c2["reminded"]:
         await funnel.run_once(bot, at2 - timedelta(minutes=90))
         assert to(V2.id, "Напоминаю") and (await sales.get_call(c2["id"]))["reminded"] == 1
+        assert to(SALES, "Скоро звонок")
 
     # 16. статистика для команды
     await feed(msg("/funnel", DAN))

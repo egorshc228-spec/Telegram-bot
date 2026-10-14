@@ -287,7 +287,7 @@ async def converse(m: Message, bot: Bot, text: str, image: bytes | None = None):
     if config.FUNNEL_ENABLED:
         from . import funnel            # импорт здесь: funnel сам импортирует этот модуль
         try:
-            await funnel.after_ai(bot, m, actions)
+            await funnel.after_ai(bot, m, actions, answer)
         except Exception:
             log.exception("ошибка воронки после ответа ИИ")
 

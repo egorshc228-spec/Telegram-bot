@@ -2,6 +2,7 @@
 и действует через инструменты (запись, личный кабинет, профиль, отмена, отзыв, вызов владельца)."""
 import asyncio
 import base64
+import re
 import logging
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -218,6 +219,21 @@ async def _run_tool(niche_key: str, name: str, args: dict, actions, profile: dic
     return "Неизвестный инструмент.", True
 
 
+_BOOKED_RE = re.compile(
+    r"(вы записаны|ви записані|записал[аи]? вас|записав вас|записала вас|запись (создана|оформлена|подтверждена)"
+    r"|запис (створено|оформлено|підтверджено)|you are booked|you're booked|booking (is )?confirmed)", re.I)
+
+NO_LEAD_NOTE = ("[Служебная пометка, клиент её не видит] Запись НЕ создана: ты не вызвал create_lead. "
+                "Если клиент уже подтвердил услугу, дату, время, имя и телефон, вызови create_lead сейчас. "
+                "Если чего-то не хватает, спроси это. Не пиши, что клиент записан, пока инструмент не вернул номер записи. "
+                "Если ты говорил о записи, которая уже есть в списке активных записей клиента, новую не создавай: повтори ответ.")
+
+
+def claims_booking(text: str) -> bool:
+    """Ответ звучит как подтверждение записи."""
+    return bool(_BOOKED_RE.search(text or ""))
+
+
 async def _get_client():
     global client
     if client is None:
@@ -260,11 +276,21 @@ async def ask(user_id: int, niche_key: str, text: str, image: bytes | None, acti
         ]
         c = await _get_client()
         answer = ""
-        for _ in range(6):
+        checked = False
+        for _ in range(7):
             resp = await c.messages.create(
                 model=config.CLAUDE_MODEL, max_tokens=700, system=system, tools=TOOLS, messages=messages)
             if resp.stop_reason != "tool_use":
                 answer = "".join(b.text for b in resp.content if b.type == "text").strip()
+                # Модель иногда пишет «вы записаны», не вызвав create_lead. Такой ответ клиенту не отдаём:
+                # один раз возвращаем модели с пометкой, чтобы она создала запись или честно уточнила данные.
+                if not checked and not actions.lead_id and claims_booking(answer):
+                    checked = True
+                    log.warning("ИИ подтвердил запись без create_lead (user %s): %s", user_id, answer[:120])
+                    messages += [{"role": "assistant", "content": resp.content},
+                                 {"role": "user", "content": NO_LEAD_NOTE}]
+                    answer = ""
+                    continue
                 break
             messages.append({"role": "assistant", "content": resp.content})
             results = []
@@ -272,6 +298,7 @@ async def ask(user_id: int, niche_key: str, text: str, image: bytes | None, acti
                 if b.type != "tool_use":
                     continue
                 res, is_err = await _run_tool(niche_key, b.name, b.input, actions, profile)
+                log.info("инструмент %s (user %s): %s%s", b.name, user_id, "ошибка: " if is_err else "", res[:120])
                 r = {"type": "tool_result", "tool_use_id": b.id, "content": res}
                 if is_err:
                     r["is_error"] = True

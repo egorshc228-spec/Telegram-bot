@@ -29,12 +29,13 @@ router = Router()
 router.message.filter(F.chat.type == "private")
 esc = html.escape
 
-VOL_MID = [5, 20, 45, 80]                  # середина диапазона «обращений в день»
-CHECK_MID = [300, 1000, 3000, 7000]        # середина диапазона среднего чека, ₴
+VOL_MID = [5, 20, 45, 60]                  # середина диапазона «обращений в день»; для «60+» — нижняя граница
+CHECK_MID = [300, 1000, 3000, 5000]        # середина диапазона среднего чека, ₴; для «5 000+» — нижняя граница
 MISS_SHARE = 0.15                          # нижняя граница оценки MedPlatforma (15–30% обращений теряется)
 CLOSE_SHARE = 0.2                          # допущение: каждый пятый из потерянных стал бы клиентом
 SLIDES = 6
-SOURCE_NAMES = {"ai": "сайт /ai-admin", "home": "сайт, главная", "ads": "сайт /google-ads", "direct": "без метки"}
+SOURCE_NAMES = {"ai": "сайт /ai-admin", "home": "сайт, главная", "ads": "сайт /google-ads",
+                "direct": "напрямую в Telegram (не с сайта)"}
 FMT_RU = {"tg": "звонок в Telegram", "meet": "Google Meet", "phone": "по телефону"}
 
 
@@ -123,7 +124,9 @@ def money(n: float) -> str:
 def when_text(dt: datetime, lang: str) -> str:
     wd = i18n.WEEKDAYS.get(lang, i18n.WEEKDAYS["uk"])[dt.weekday()]
     word = "в" if lang == "ru" else "о"
-    return f"{wd} {dt:%d.%m} {word} {dt:%H:%M}"
+    delta = (dt.date() - sales.now().date()).days
+    rel = {0: {"ru": "сегодня", "uk": "сьогодні"}, 1: {"ru": "завтра", "uk": "завтра"}}.get(delta, {}).get(lang, "")
+    return (f"{rel}, " if rel else "") + f"{wd} {dt:%d.%m} {word} {dt:%H:%M}"
 
 
 def fmt_label(lang: str, fmt: str) -> str:
@@ -202,7 +205,7 @@ async def choose_niche(target: Message, user, k: str, lang: str, biz_text: str |
 
 # ================================================================ после каждого ответа ИИ в демо
 
-async def after_ai(bot: Bot, m: Message, actions) -> None:
+async def after_ai(bot: Bot, m: Message, actions, answer: str = "") -> None:
     """Вызывается из bot.converse после ответа ИИ: считаем шаги демо и вовремя подсказываем следующий."""
     if not on():
         return
@@ -224,9 +227,11 @@ async def after_ai(bot: Bot, m: Message, actions) -> None:
     if getattr(actions, "lead_id", None) and not p.get("demo_booked"):
         await sales.update(uid, demo_booked=1)
         await tracked(uid, "demo_booking")
-        await m.answer(ft(lang, "nudge_booked"), reply_markup=ikb([[(ft(lang, "btn_owner"), "fo:owner")]]))
+        await m.answer(ft(lang, "nudge_booked"))
+        await show_owner(m, m.from_user)          # сразу его собственная заявка глазами владельца
         return
-    if n >= 3 and not p.get("demo_booked") and not p.get("nudged"):
+    # подсказку не вставляем посреди записи: если бот сейчас что-то спрашивает, ждём следующего хода
+    if n >= 3 and "?" not in (answer or "") and not p.get("demo_booked") and not p.get("nudged"):
         await sales.update(uid, nudged=1)
         await m.answer(ft(lang, "nudge_try_booking"), reply_markup=ikb([[(ft(lang, "btn_owner"), "fo:owner")]]))
 
@@ -352,7 +357,9 @@ async def calc(cb: CallbackQuery):
     loss = lost * CLOSE_SHARE * CHECK_MID[j]
     x = loss / (120 * config.USD_UAH)
     ratio = ft(lang, "ratio", x=int(x), word=times_word(int(x), lang)) if x >= 2 else ""
-    await sales.update(cb.from_user.id, calc=f"~{lost} обращений/мес без быстрого ответа ≈ {money(loss)} ₴/мес")
+    clients = round(lost * CLOSE_SHARE)
+    await sales.update(cb.from_user.id, calc=f"~{lost} обращений/мес без быстрого ответа → ~{clients} клиентов "
+                                             f"≈ {money(loss)} ₴/мес (оценка)")
     await tracked(cb.from_user.id, "calc_done", volume=vol, check=j)
     await _show(cb, ft(lang, "p2_result", month=money(month), lost=money(lost), money=money(loss), ratio=ratio),
                 ikb([[(ft(lang, "btn_back"), "fp:2"), (ft(lang, "btn_next"), "fp:3")],
@@ -536,10 +543,15 @@ async def book(bot: Bot, target: Message, user, lang: str, at: datetime, fmt: st
     if phone:
         await db.set_profile(user.id, None, phone)
     await tracked(user.id, "call_booked", fmt=fmt)
-    await target.answer(ft(lang, "booked", when=when_text(at, lang), fmt=fmt_label(lang, fmt)),
+    await target.answer(ft(lang, "booked", when=when_text(at, lang), fmt=fmt_label(lang, fmt),
+                           next=ft(lang, "next_" + fmt) if fmt in ("tg", "meet", "phone") else ""),
                         reply_markup=call_kb(lang, call_id))
+    todo = {"meet": "🔗 Нужна ссылка на Google Meet: создай встречу и отправь кнопкой «Написать через бота»",
+            "phone": "☎️ Позвонить на номер выше",
+            "tg": "📞 Позвонить в Telegram"}.get(fmt, "")
     card = (f"📞 <b>Запись на звонок</b> — {when_text(at, 'ru')} (Киев), {FMT_RU.get(fmt, fmt)}"
-            + (f"\n📱 {esc(phone)}" if phone else "") + "\n" + await prospect_card(user))
+            + (f"\n📱 {esc(phone)}" if phone else "") + "\n" + await prospect_card(user)
+            + (f"\n\n{todo}" if todo else ""))
     await notify_sales(bot, card, ikb([[("✅ Подтвердить", f"sc:ok:{call_id}"), ("🔁 Другое время", f"sc:re:{call_id}")],
                                        [("✉️ Написать через бота", f"sr:{user.id}")]]))
 
@@ -661,7 +673,7 @@ async def prospect_card(user) -> str:
     src = SOURCE_NAMES.get(p.get("source") or "direct", p.get("source") or "—")
     seen = p.get("pitch_seen")
     pitch = f"{seen + 1}/{SLIDES}" if isinstance(seen, int) and seen >= 0 else "не открывал"
-    yes = lambda v: "✅" if v else "—"  # noqa: E731
+    yes = lambda v: "✅" if v else "нет"  # noqa: E731
     lines = [
         f"👤 {esc(core.who(user))} · id {user.id}",
         f"🏢 Сфера: {biz}",
@@ -672,7 +684,7 @@ async def prospect_card(user) -> str:
         lines.append(f"🧮 Калькулятор: {esc(p['calc'])}")
     lines += [
         f"🧭 Источник: {esc(src)}" + (" (GA связан)" if p.get("cid") else ""),
-        f"🎬 Демо: {p.get('demo_msgs') or 0} сообщ. · записался {yes(p.get('demo_booked'))} · "
+        f"🎬 Демо: {p.get('demo_msgs') or 0} сообщ. · записался как клиент {yes(p.get('demo_booked'))} · "
         f"видел заявку владельца {yes(p.get('owner_seen'))} · презентация {pitch}",
     ]
     return "\n".join(lines)
@@ -723,14 +735,18 @@ async def run_once(bot: Bot, at: datetime | None = None) -> dict:
     for c in await sales.due_call_reminders(at):
         await sales.mark_call_reminded(c["id"])
         lang = i18n.resolve(await db.get_user(c["user_id"]))
+        at_dt = datetime.fromisoformat(c["at"])
         try:
-            await bot.send_message(c["user_id"], ft(lang, "call_reminder",
-                                                    when=when_text(datetime.fromisoformat(c["at"]), lang),
+            await bot.send_message(c["user_id"], ft(lang, "call_reminder", when=when_text(at_dt, lang),
                                                     fmt=fmt_label(lang, c["format"])),
                                    reply_markup=call_kb(lang, c["id"]))
             sent["reminders"] += 1
         except Exception:
             log.warning("напоминание о звонке №%s не отправлено", c["id"], exc_info=True)
+        who_ = "@" + c["username"] if c.get("username") else esc(c.get("name") or str(c["user_id"]))
+        await notify_sales(bot, f"⏰ Скоро звонок: <b>{when_text(at_dt, 'ru')}</b>, {FMT_RU.get(c['format'], c['format'])} · "
+                                f"{who_}" + (f" · 📱 {esc(c['phone'])}" if c.get("phone") else ""),
+                           ikb([[("✉️ Написать через бота", f"sr:{c['user_id']}")]]))
     return sent
 
 
