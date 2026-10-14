@@ -111,11 +111,13 @@
 8. Если в демо человек пишет «хочу такого бота» / «сколько стоит» — ИИ отвечает ориентиром ($800 + $120/мес), бот показывает
    кнопку записи, Даниилу уходит «горячая» карточка.
 
-Команды: `/call` — записаться на звонок; `/funnel [дни]` — воронка по шагам и источникам (только OWNER_ID/SALES_CHAT_ID).
+Команды: `/call` — записаться на звонок; `/funnel [дни]` — воронка по шагам и источникам (OWNER_ID, SALES_STAFF_IDS или в группе «Заявки»).
+
+**Группа «Заявки».** Создайте группу в Telegram, добавьте туда бота и сделайте его админом, узнайте ID группы (в web.telegram.org/a он в адресе после #, например -1001234567890) и впишите его в `SALES_CHAT_ID`. Карточки, напоминания и «хочет такого бота» пойдут в группу; кнопки может нажимать любой участник; «Написать через бота» — ответом на сообщение бота. ИИ в группе не отвечает.
 
 **Метка с сайта.** Ссылка `t.me/CladchatBot?start=<источник>_<ga-client-id через дефис>`, например `ai_123456789-1700000000`
-(`ai` = /ai-admin, `home` = главная, `ads` = /google-ads). Сайт подставляет её сам при клике. Если заданы
-`GA4_MEASUREMENT_ID` и `GA4_API_SECRET`, события бота (`bot_start`, `demo_niche`, `demo_booking`, `owner_view`, `pitch_view`,
+(`ai` = /ai-admin, `home` = главная, `ads` = /google-ads). Сайт подставляет её сам при клике. Если в Railway Variables задан
+`GA4_API_SECRET` (секрет «demo-bot», в git не хранится), события бота (`bot_start`, `demo_niche`, `demo_booking`, `owner_view`, `pitch_view`,
 `calc_done`, `slots_view`, `call_booked`, `want_bot`, `followup_sent`, `opt_out`) уходят в GA4 к тому же посетителю, что и клик.
 
 **Файлы:** `app/funnel.py` (роутер воронки, подключается ПЕРЕД основным), `app/funnel_texts.py` (все тексты, uk/ru),
@@ -156,5 +158,3 @@ tests/           python -m tests.test_demo ; tests.test_flow ; tests.test_bookin
 - Напоминания (`app/reminders.py`): за сутки и за 2 часа до визита, на языке клиента. Если запись сделана
   впритык, лишнее напоминание пропускается. Отменённым и отклонённым записям не шлём. В демо: `/reminder`.
 - Тесты: `python -m tests.test_demo`, `python -m tests.test_i18n`, `python -m tests.test_flow`, `python -m tests.test_booking`.
-
-update
