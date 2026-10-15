@@ -2,6 +2,7 @@
 и действует через инструменты (запись, личный кабинет, профиль, отмена, отзыв, вызов владельца)."""
 import asyncio
 import base64
+import html
 import re
 import logging
 from datetime import date, datetime, timedelta
@@ -72,16 +73,6 @@ TOOLS = [
         },
     },
     {
-        "name": "set_language",
-        "description": "Переключить язык общения с клиентом (ru, uk или en): когда клиент просит говорить на другом "
-                       "языке. Язык сохраняется для всех следующих сообщений, напоминаний и личного кабинета.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"lang": {"type": "string", "enum": ["ru", "uk", "en"]}},
-            "required": ["lang"],
-        },
-    },
-    {
         "name": "ask_owner",
         "description": "Передать вопрос владельцу, когда нужна его помощь или решение (нет данных, жалоба, "
                        "клиент просит человека, запись не получается, ситуация непонятна). "
@@ -100,9 +91,28 @@ def _now() -> datetime:
     return datetime.now(ZoneInfo(config.TIMEZONE))
 
 
-def upcoming_days(n: int = 5) -> list:
+DAYS_AHEAD = 7   # неделя вперёд: «на четверг» в четверг = четверг через неделю, он тоже в списке
+WD_RU = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+
+
+def upcoming_days(n: int = DAYS_AHEAD) -> list:
     start = _now().date() + timedelta(days=1)
     return [start + timedelta(days=i) for i in range(n)]
+
+
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.S)
+_MD_HEAD = re.compile(r"^\s{0,3}#{1,6}\s*", re.M)
+_MD_BULLET = re.compile(r"^(\s*)[*-]\s+", re.M)
+
+
+def to_html(text: str, limit: int = 3900) -> str:
+    """Ответ модели → безопасный HTML для Telegram: экранируем всё, а **жирный** превращаем в <b>,
+    заголовки «#» и списки «*»/«-» — в обычный текст и «•». Так клиент никогда не видит звёздочек."""
+    t = _MD_HEAD.sub("", (text or "")[:limit])
+    t = _MD_BULLET.sub(lambda m: m.group(1) + "• ", t)
+    t = html.escape(t, quote=False)
+    t = _MD_BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", t)
+    return t.replace("**", "").replace("__", "")
 
 
 def static_system(niche_key: str) -> str:
@@ -136,7 +146,7 @@ async def _days_text(niche_key: str) -> str:
     except BookingError:
         return ("Расписание сейчас недоступно. Не называй конкретное время и не создавай записи: "
                 "вызови ask_owner (расписание недоступно) и скажи клиенту, что администратор уточнит время.")
-    return "\n".join(f"- {d.isoformat()} ({d.strftime('%a')}): {', '.join(res.get(d, [])) or 'занято'}"
+    return "\n".join(f"- {d.isoformat()} ({WD_RU[d.weekday()]}, {d:%d.%m}): {', '.join(res.get(d, [])) or 'занято'}"
                      for d in upcoming_days() if d in res)
 
 
@@ -149,8 +159,9 @@ async def dynamic_system(niche_key: str, profile: dict, bookings: list) -> str:
     mine = "\n".join(f"- №{b['id']}: {b['service']}, {b['date']} {b['time']}, статус {b['status']}"
                      for b in bookings) or "нет"
     lang = i18n.resolve(profile)
-    return (f"Язык клиента: {i18n.lang_name_ru(lang)} ({lang}). Отвечай на нём.\n"
-            f"Сегодня {_now().date().isoformat()} ({_now().strftime('%A')}).\n\n"
+    return (f"Язык клиента: {i18n.lang_name_ru(lang)} ({lang}). Отвечай на нём; если последнее сообщение клиента на другом из трёх языков (ru/uk/en), отвечай на языке этого сообщения.\n"
+            f"Сегодня {_now().date().isoformat()}, {WD_RU[_now().weekday()]} ({_now():%d.%m}). "
+            f"Записать можно только на дни из списка ниже (с завтрашнего).\n\n"
             f"Свободное время на ближайшие дни:\n{await _days_text(niche_key)}\n\n"
             f"Профиль клиента: {prof}\n\nАктивные записи клиента:\n{mine}")
 
@@ -203,13 +214,6 @@ async def _run_tool(niche_key: str, name: str, args: dict, actions, profile: dic
             return await actions.cancel_booking(int(args.get("booking_id", 0))), False
         if name == "leave_review":
             return await actions.leave_review(int(args.get("rating", 0)), str(args.get("text", ""))[:500]), False
-        if name == "set_language":
-            lang = str(args.get("lang", "")).lower()
-            if lang not in i18n.LANGS:
-                return "Доступны языки: ru, uk, en.", True
-            await actions.set_language(lang)
-            profile["lang"] = lang
-            return i18n.t("ru", "lang_tool_ok", name=i18n.lang_name_ru(lang)), False
         if name == "ask_owner":
             return await actions.ask_owner(str(args.get("reason", ""))[:200], str(args.get("details", ""))[:600]), False
     except BookingError as e:

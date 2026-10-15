@@ -95,7 +95,7 @@ async def test_db_and_report():
     assert "Анна" in lead_card(l) and "Altegio №77" in lead_card(l)
     await db.set_status(lid, "cancel")
     assert "Отменена" in lead_card(await db.get_lead(lid))
-    ws = load_workbook(io.BytesIO(leads_to_xlsx(await db.leads_for(1)))).active
+    ws = load_workbook(io.BytesIO(leads_to_xlsx(await db.leads_for(1), "ru"))).active
     assert ws["H2"].value == "Анна" and ws["L2"].value == "Отменена клиентом" and ws["M2"].value == "Altegio №77"
     await db.add_review(1, "u", "salon", 5, "супер")
     await db.add_review(1, "u", "salon", 3, "норм")
@@ -126,9 +126,6 @@ class FakeActions:
     async def leave_review(self, rating, text):
         self.log.append(("review", rating, text))
         return "Отзыв сохранён"
-
-    async def set_language(self, lang):
-        self.log.append(("lang", lang))
 
     async def ask_owner(self, reason, details):
         self.log.append(("owner", reason))
@@ -180,22 +177,18 @@ async def test_ai_tools():
     ai.client = ScriptedClient(tool("ask_owner", reason="Просит скидку"), say("Сейчас спрошу у владельца"))
     assert await ai.ask(11, "salon", "дайте скидку 50%", None, a, {}, []) == "Сейчас спрошу у владельца"
     assert a.log == [("owner", "Просит скидку")]
-    # смена языка и английское название услуги
+    # английское название услуги принимается, в базу уходит русское
     a = FakeActions()
-    p2 = {"name": "Анна", "phone": "0501234567"}
-    ai.client = ScriptedClient(tool("set_language", lang="en"),
-                               tool("create_lead", service="Women's haircut", date=t.isoformat(), time=slot),
+    p2 = {"name": "Анна", "phone": "0501234567", "lang": "en"}
+    ai.client = ScriptedClient(tool("create_lead", service="Women's haircut", date=t.isoformat(), time=slot),
                                say("Booked!"))
-    await ai.ask(13, "salon", "switch to English and book a haircut", None, a, p2, [])
-    assert ("lang", "en") in a.log and p2["lang"] == "en"
+    await ai.ask(13, "salon", "book a haircut", None, a, p2, [])
     assert a.lead_id == 42 and a.log[-1][1]["service"] == "Женская стрижка"
-    a = FakeActions()
-    ai.client = ScriptedClient(tool("set_language", lang="de"), say("ok"))
-    await ai.ask(14, "salon", "auf Deutsch", None, a, {}, [])
-    assert a.log == [] and ai.client.calls[1]["messages"][-1]["content"][0]["is_error"]
+    # инструмента смены языка больше нет: язык определяется по сообщениям
+    assert "set_language" not in [x["name"] for x in ai.TOOLS]
     ai.client = ScriptedClient(say("Привіт"))
-    await ai.ask(15, "salon", "привіт", None, FakeActions(), {"tg_lang": "uk-UA"}, [])
-    assert any("украинский" in b["text"] for b in ai.client.calls[0]["system"])
+    await ai.ask(15, "salon", "привіт", None, FakeActions(), {}, [])
+    assert any("украинский" in b["text"] for b in ai.client.calls[0]["system"])   # по умолчанию украинский
     assert "uk: Жіноча стрижка; en: Women's haircut" in ai.static_system("salon")
     # фото уходит как image-блок
     ai.client = ScriptedClient(say("Это маникюр"))

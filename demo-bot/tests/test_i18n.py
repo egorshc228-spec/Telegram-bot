@@ -53,11 +53,65 @@ def test_niches_translated():
 
 
 def test_resolve():
-    assert i18n.guess("uk-UA") == "uk" and i18n.guess("en-US") == "en" and i18n.guess("ru") == "ru"
-    assert i18n.guess("de") == i18n.default_lang() and i18n.guess(None) == i18n.default_lang()
-    assert i18n.resolve({"lang": "en", "tg_lang": "uk"}) == "en"            # выбор клиента главнее Telegram
-    assert i18n.resolve({"tg_lang": "uk"}) == "uk" and i18n.resolve(None, "en") == "en"
-    assert i18n.resolve({"lang": "xx"}) == i18n.default_lang()
+    assert i18n.default_lang() == "uk"                                       # по умолчанию украинский
+    assert i18n.resolve({"lang": "en", "tg_lang": "uk"}) == "en"            # сохранённый язык главнее всего
+    assert i18n.resolve({"tg_lang": "ru"}) == "uk" and i18n.resolve(None, "en") == "uk"   # Telegram не учитывается
+    assert i18n.resolve({"lang": "xx"}) == "uk" and i18n.resolve(None) == "uk"
+    assert not hasattr(i18n, "guess")
+
+
+def test_detect():
+    d = i18n.detect
+    assert d("Привіт, хочу записатись на стрижку") == "uk" and d("Скільки коштує манікюр?") == "uk"
+    assert d("Добрий день") == "uk" and d("дякую!") == "uk"
+    assert d("Здравствуйте, хочу записаться на завтра") == "ru" and d("Сколько стоит маникюр?") == "ru"
+    assert d("привет") == "ru" and d("Что по ценам?") == "ru"
+    assert d("I want to book a haircut for tomorrow") == "en" and d("hello") == "en" and d("How much is it?") == "en"
+    # нейтральное: язык не меняется
+    for neutral in ("", None, "   ", "050 123 45 67", "5", "👍", "Anna", "Anna Ivanova", "/cabinet", "/start x", "ок"):
+        assert d(neutral) is None, neutral
+
+
+def test_funnel_texts_en():
+    import re
+    from app.funnel_texts import FT, ft
+    for key, v in FT.items():
+        assert set(v) == {"uk", "ru", "en"}, key
+        for lg in ("ru", "en"):
+            a, b = v["uk"], v[lg]
+            if isinstance(a, str):
+                assert sorted(re.findall(r"\{\w+\}", a)) == sorted(re.findall(r"\{\w+\}", b)), (key, lg)
+            elif isinstance(a, list):
+                assert len(a) == len(b), (key, lg)
+            else:
+                assert set(a) == set(b), (key, lg)
+    assert ft("en", "btn_book").startswith("📅") and ft("xx", "btn_book") == ft("uk", "btn_book")
+
+
+def test_report_langs():
+    import io
+    from openpyxl import load_workbook
+    from app.report import leads_to_xlsx
+    lead = dict(id=1, created="2026-10-15T10:00:00", niche="salon", service="Женская стрижка", price=700,
+                date="2026-10-16", time="10:00", name="Anna", phone="050", comment=None, source="AI", status="ok")
+    for lg, head, status, svc in (("uk", "Послуга", "Підтверджена", "Жіноча стрижка"),
+                                  ("ru", "Услуга", "Подтверждена", "Женская стрижка"),
+                                  ("en", "Service", "Confirmed", "Women's haircut")):
+        ws = load_workbook(io.BytesIO(leads_to_xlsx([lead], lg))).active
+        assert ws["D1"].value == head and ws["L2"].value == status and ws["D2"].value == svc, lg
+    ws = load_workbook(io.BytesIO(leads_to_xlsx([lead]))).active          # по умолчанию украинский
+    assert ws["D1"].value == "Послуга"
+
+
+def test_no_language_selection():
+    for lg in i18n.LANGS:
+        assert "/language" not in i18n.t(lg, "profile") and "/language" not in i18n.t(lg, "cab_todo")
+        assert "/language" not in i18n.t(lg, "welcome", company="x", about="x", services="x", hours="x", address="x",
+                                          photo="x", examples="x")
+    for key in ("lang_choose", "lang_set_first", "lang_changed", "lang_tool_ok"):
+        assert key not in i18n.TEXTS
+    for cmds in i18n.COMMANDS.values():
+        assert "language" not in [c for c, _ in cmds]
 
 
 class FakeBot:
@@ -78,8 +132,8 @@ async def test_reminders():
         d = now + delta
         return d.date().isoformat(), d.strftime("%H:%M")
 
-    await db.touch_user(1, "a", "uk-UA")
-    await db.touch_user(2, "b", "en-US")
+    await db.touch_user(1, "a")
+    await db.touch_user(2, "b")
     await db.set_lang(2, "en")
 
     async def add(uid, delta, status=None):
@@ -132,6 +186,10 @@ def main():
     test_texts_complete()
     test_niches_translated()
     test_resolve()
+    test_detect()
+    test_funnel_texts_en()
+    test_report_langs()
+    test_no_language_selection()
     asyncio.run(test_reminders())
     print("языки и напоминания: все проверки пройдены")
 

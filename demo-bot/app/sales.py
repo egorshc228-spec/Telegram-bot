@@ -274,6 +274,10 @@ async def set_call_status(call_id: int, status: str):
         await update(c["user_id"], call_id=None)
 
 
+async def set_call_phone(call_id: int, phone: str):
+    await _exec("UPDATE calls SET phone=? WHERE id=?", (phone, call_id))
+
+
 async def due_call_reminders(at: datetime | None = None) -> list[dict]:
     at = at or now()
     rows = await _rows("SELECT * FROM calls WHERE status IN ('booked','confirmed') AND COALESCE(reminded,0)=0")

@@ -42,7 +42,7 @@ class Fake(BaseSession):
 
 CLIENT = User(id=1, is_bot=False, first_name="C", username="client")
 CLIENT2 = User(id=2, is_bot=False, first_name="D", username="second")
-CLIENT3 = User(id=3, is_bot=False, first_name="E", username="third", language_code="uk")
+CLIENT4 = User(id=4, is_bot=False, first_name="E", username="fourth", language_code="en")
 OWNER = User(id=OWNER_ID, is_bot=False, first_name="O", username="owner")
 uid = 0
 
@@ -89,20 +89,18 @@ async def main():
     day = next(d for d in ai.upcoming_days() if len(free_slots("salon", d)) >= 3)
     s1, s2, s3 = free_slots("salon", day)[:3]
 
-    # 1. старт: сначала выбор языка (кнопки только здесь), затем стартовое сообщение без кнопок
+    # 1. старт: выбора языка нет, стартовое сообщение сразу на украинском (язык по умолчанию), без кнопок
     await feed(msg("/start"))
-    ch = to(1)[-1]
-    assert "Choose your language" in ch["text"] and len(ch["markup"].inline_keyboard[0]) == 3
-    await feed(cbq("lang:ru", CLIENT))
-    assert (await db.get_user(1))["lang"] == "ru"
-    w = to(1, "Какие услуги есть")[-1]
-    assert "Какие услуги есть" in w["text"] and "Женская стрижка" in w["text"] and "Кнопок нет" in w["text"]
-    assert w["markup"] is None
+    w = to(1, "Які послуги є")[-1]
+    assert "Жіноча стрижка" in w["text"] and "Кнопок немає" in w["text"] and w["markup"] is None
+    assert "Choose your language" not in "".join(s["text"] or "" for s in SENT)
+    assert (await db.get_user(1)).get("lang") is None            # пока клиент не писал, язык не закреплён
 
     # 2. обычное приветствие, ответ Claude без кнопок
     ai.client = ScriptedClient(say("Здравствуйте! Чем помочь?"))
     await feed(msg("привет"))
     assert to(1, "Чем помочь") and to(1)[-1]["markup"] is None
+    assert (await db.get_user(1))["lang"] == "ru"                 # написал по-русски: язык запомнен
 
     # 3. запись текстом: профиль сохраняется, владелец получает заявку с кнопками
     ai.client = ScriptedClient(tool("create_lead", service="Женская стрижка", date=day.isoformat(), time=s1,
@@ -213,6 +211,25 @@ async def main():
     await feed(msg("/stats", CLIENT))
     assert len(SENT) == n, "обычному клиенту /stats не отвечает"
 
+    # 13b. рассылка владельца: предпросмотр, подтверждение, доставка всем клиентам; чужим команда недоступна
+    n = len(SENT)
+    await feed(msg("/broadcast Завтра с 10 до 12 технические работы", CLIENT))
+    assert len(SENT) == n
+    await feed(msg("/broadcast", OWNER))
+    await feed(msg("Завтра с 10:00 до 12:00 технические работы <b>", OWNER))
+    pv = to(OWNER_ID, "Так увидят клиенты")[-1]
+    assert "технические работы" in pv["text"] and pv["markup"].inline_keyboard[0][0].callback_data == "bc:go"
+    await feed(cbq("bc:go", CLIENT))                              # чужая кнопка не запускает рассылку
+    assert not to(1, "технические работы")
+    await feed(cbq("bc:go", OWNER))
+    assert to(1, "📢") and not to(OWNER_ID, "📢 Завтра")
+    assert "&lt;b&gt;" in to(1, "технические работы")[-1]["text"]
+    n = len(to(1, "📢"))
+    await feed(msg("/broadcast Тест отмены", OWNER))
+    await feed(cbq("bc:no", OWNER))
+    await feed(cbq("bc:go", OWNER))                               # после отмены текст сброшен: повторно не уходит
+    assert len(to(1, "📢")) == n
+
     # 14. «хочу такого бота»: Claude передаёт владельцу
     ai.client = ScriptedClient(tool("ask_owner", reason="Хочет такого бота для бизнеса", details="кафе, @client"),
                                say("Владелец свяжется с вами"))
@@ -252,11 +269,13 @@ async def main():
     assert "Демо-режим" not in to(1)[-1]["text"] and "Лаванда" in to(1)[-1]["text"]
     config.DEMO_MODE = True
 
-    # 18. язык: смена командой, кабинет/профиль/приветствие на выбранном языке
-    await feed(msg("/language"))
-    assert to(1)[-1]["markup"] is not None
-    await feed(cbq("lang:uk", CLIENT))
+    # 18. язык определяется по сообщениям и запоминается: украинский, потом английский
+    await feed(msg("/language"))                                  # команды выбора языка больше нет
+    assert to(1, "Не знаю такой команды")
+    ai.client = ScriptedClient(say("Вітаю! Чим допомогти?"))
+    await feed(msg("Привіт, скільки коштує стрижка?"))
     assert (await db.get_user(1))["lang"] == "uk"
+    assert any("украинский" in b["text"] for b in ai.client.calls[0]["system"])
     await feed(msg("/cabinet"))
     assert to(1, "Особистий кабінет")
     await feed(msg("/profile"))
@@ -265,14 +284,18 @@ async def main():
     assert to(1, "Які послуги є")[-1] and "Жіноча стрижка" in to(1, "Які послуги є")[-1]["text"]
     await feed(msg("/blah"))
     assert to(1, "Не знаю такої команди")
-    # Claude переключает язык по просьбе клиента и записывает по английскому названию услуги
-    ai.client = ScriptedClient(tool("set_language", lang="en"),
-                               tool("create_lead", service="Women's haircut", date=day.isoformat(), time=s3),
+    # клиент пишет по-английски и записывается по английскому названию услуги
+    ai.client = ScriptedClient(tool("create_lead", service="Women's haircut", date=day.isoformat(), time=s3),
                                say("Booked, see you!"))
-    await feed(msg("switch to English, book a haircut"))
+    await feed(msg("Hello, I want to book a haircut"))
     assert (await db.get_user(1))["lang"] == "en"
+    assert any("английский" in b["text"] for b in ai.client.calls[0]["system"])
     l3 = await db.get_lead(3)
     assert l3["service"] == "Женская стрижка" and to(OWNER_ID, "Женская стрижка")[-1]
+    # нейтральное сообщение (телефон) язык не меняет
+    ai.client = ScriptedClient(say("Thanks!"))
+    await feed(msg("050 123 45 67"))
+    assert (await db.get_user(1))["lang"] == "en"
     # владельцу карточка на русском, клиенту подтверждение на английском
     await feed(cbq("ok:3", OWNER))
     ok_msg = to(1, "your booking is confirmed")[-1]
@@ -281,12 +304,17 @@ async def main():
     await feed(msg("See you soon", OWNER))
     assert to(1, "Administrator")
     await feed(msg("/cabinet"))
-    assert to(1, "Your account") and to(1, "Women's haircut")
+    assert to(1, "Your account") and to(1, "Women's haircut")        # кабинет на английском после английской записи
     await feed(msg("/owner"))
     assert to(1, "This is how the booking looks")
-    # новый клиент с украинским Telegram: без выбора язык по умолчанию украинский
-    await feed(msg("/cabinet", CLIENT3))
-    assert (await db.get_user(3))["tg_lang"] == "uk" and to(3, "Особистий кабінет")
+    # новый клиент: язык Telegram (uk) не нужен, по умолчанию украинский
+    await feed(msg("/cabinet", CLIENT4))
+    assert to(4, "Особистий кабінет") and (await db.get_user(4)).get("lang") is None
+    # новый клиент пишет по-русски: кабинет на русском
+    ai.client = ScriptedClient(say("Здравствуйте!"))
+    await feed(msg("Здравствуйте, хочу записаться", CLIENT4))
+    await feed(msg("/cabinet", CLIENT4))
+    assert (await db.get_user(4))["lang"] == "ru" and to(4, "Личный кабинет")
     print("поток без кнопок работает, отправок:", len(SENT))
 
 

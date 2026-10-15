@@ -14,7 +14,7 @@ from aiogram.enums import ParseMode  # noqa: E402
 from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
 from aiogram.types import Contact, User  # noqa: E402
 
-from app import ai, booking, config, db, funnel, sales  # noqa: E402
+from app import ai, booking, config, db, funnel, i18n, sales  # noqa: E402
 from app.bot import router  # noqa: E402
 from app.niches import free_slots  # noqa: E402
 from tests.fakes import ScriptedClient, say, tool  # noqa: E402
@@ -130,7 +130,7 @@ async def main():
     assert ("💇 Салон краси", "fn:salon") in buttons(s)
     p = await sales.get(V.id)
     assert p["source"] == "ai" and p["cid"] == "123456789.1700000000" and p["stage"] == "start"
-    assert (await db.get_user(V.id))["lang"] == "uk"
+    assert (await db.get_user(V.id)).get("lang") is None and i18n.resolve(await db.get_user(V.id)) == "uk"
 
     # 2. сфера → роль клиента и клавиатура с примерами и двумя кнопками
     await feed(cbq("fn:salon", V))
@@ -260,7 +260,10 @@ async def main():
 
     # 11. второй посетитель: «хочу такого бота» в демо → кнопка записи + горячая карточка Даниилу
     await feed(msg("/start home", V2))
-    assert "AI-администратора от ADrenaline" in last(V2.id)["text"]
+    assert "AI-адміністратора від ADrenaline" in last(V2.id)["text"]          # язык Telegram (ru) не учитывается: uk
+    await feed(msg("Здравствуйте, расскажите что вы умеете", V2))            # написал по-русски: стартовый экран на ru
+    assert "AI-администратора от ADrenaline" in last(V2.id)["text"] and ("💇 Салон красоты", "fn:salon") in buttons(last(V2.id))
+    assert (await db.get_user(V2.id))["lang"] == "ru" and (await sales.get(V2.id))["stage"] == "start"
     await feed(cbq("fn:other", V2))
     await feed(msg("фитнес-студия в Одессе", V2))
     assert to(V2.id, "Покажу на самом близком") and (await sales.get(V2.id))["biz_text"] == "фитнес-студия в Одессе"
@@ -271,7 +274,7 @@ async def main():
     assert "20-минутный звонок" in w["text"] and ("📅 Выбрать время звонка", "fb:go") in buttons(w)
     assert (await sales.get(V2.id))["want_bot"] == 1 and to(SALES, "Хочет такого бота")
     sysprompt = "".join(b["text"] for b in ai.client.calls[0]["system"] if b["type"] == "text")
-    assert "сайта ADrenaline" in sysprompt and "$800" in sysprompt and "$40" in sysprompt
+    assert "сайта ADrenaline" in sysprompt and "$800" in sysprompt and "$160" in sysprompt and "$120" not in sysprompt
 
     # 12. запись с телефоном: кнопка «поделиться номером»
     await feed(cbq("fb:go", V2))
@@ -289,9 +292,56 @@ async def main():
     await feed(msg(None, V2, contact=Contact(phone_number="+380671112233", first_name="Ivan", user_id=V2.id)))
     assert to(V2.id, "Готово!") and "+380671112233" in to(SALES, "по телефону")[-1]["text"]
 
+    # 12b. старые кнопки времени при уже назначенном звонке: не создаём второй и не переносим молча — спрашиваем
+    c_old = await sales.active_call(V2.id)
+    free = await sales.free_slots()
+    new_at = next(t for d in free for t in free[d] if sales._iso(t) != c_old["at"])
+    stamp = f"{new_at:%Y-%m-%dT%H%M}"
+    n_calls = len(await sales._rows("SELECT * FROM calls WHERE user_id=?", (V2.id,)))
+    await feed(cbq(f"ff:tg:{stamp}", V2))
+    q = last(V2.id)
+    assert "уже есть звонок" in q["text"] and "Перенести" in q["text"] and ("Оставить как есть", "fm:keep") in buttons(q)
+    assert len(await sales._rows("SELECT * FROM calls WHERE user_id=?", (V2.id,))) == n_calls
+    await feed(cbq("fm:keep", V2))
+    assert "оставляем звонок" in last(V2.id)["text"] and (await sales.active_call(V2.id))["id"] == c_old["id"]
+    await feed(cbq(f"ff:tg:{stamp}", V2))
+    await feed(cbq(f"fm:tg:{stamp}", V2))
+    moved = last(V2.id)["text"]
+    assert "Перенесено с" in moved and "Готово!" in moved, moved
+    c_new = await sales.active_call(V2.id)
+    assert c_new["id"] != c_old["id"] and c_new["at"] == sales._iso(new_at)
+    assert (await sales.get_call(c_old["id"]))["status"] == "resched"
+    assert (await sales.get(V2.id))["call_id"] == c_new["id"]
+    assert to(SALES, "Перенос звонка")
+
+    # 12c. контакт вне шага «номер»: к звонку без номера прикрепляется номер, Даниилу — уведомление
+    await feed(msg(None, V2, contact=Contact(phone_number="+380509998877", first_name="Ivan", user_id=V2.id)))
+    assert (await sales.get_call(c_new["id"]))["phone"] == "+380509998877"
+    assert to(SALES, "+380509998877") and "передал Даниилу" in last(V2.id)["text"]
+    assert not to(V2.id, "понимаю текст и фото")
+
+    # 12d. Google Meet: с MEET_URL ссылка уходит клиенту сразу, в подтверждении и в напоминании
+    config.MEET_URL = "https://meet.google.com/abc-defg-hij"
+    free = await sales.free_slots()
+    at3 = next(t for d in free for t in free[d] if sales._iso(t) != c_new["at"])
+    await feed(cbq(f"fm:meet:{at3:%Y-%m-%dT%H%M}", V2))
+    b = last(V2.id)["text"]
+    assert "meet.google.com/abc-defg-hij" in b and "Перенесено" in b, b
+    assert "Клиенту отправлена ссылка" in to(SALES, "Перенос звонка")[-1]["text"]
+    c_meet = await sales.active_call(V2.id)
+    await feed(cbq(f"sc:ok:{c_meet['id']}", DAN))
+    assert "meet.google.com" in to(V2.id, "подтвердил звонок")[-1]["text"]
+    config.MEET_URL = ""
+
+    # 12e. «Глазами владельца» после досмотренной презентации: вместо повтора презентации — запись на звонок
+    assert (await sales.get(V.id))["pitch_seen"] == 5 and not await sales.active_call(V.id)
+    await feed(msg("👀 Очима власника", V))
+    kb_ = buttons(last(V.id))
+    assert ("📅 Обрати час дзвінка", "fb:go") in kb_ and not any(d == "fpn:0" for _, d in kb_), kb_
+
     # 13. третий посетитель без меток, язык de → украинский по умолчанию; молчит → фоллоу-апы по расписанию
     await feed(msg("/start", V3))
-    assert (await db.get_user(V3.id))["lang"] == "uk" and (await sales.get(V3.id))["source"] == "direct"
+    assert i18n.resolve(await db.get_user(V3.id)) == "uk" and (await sales.get(V3.id))["source"] == "direct"
     await feed(cbq("fn:auto", V3))
     p = await sales.get(V3.id)
     last_active = datetime.fromisoformat(p["last_active"])
@@ -356,11 +406,91 @@ async def main():
     assert not to(MATE.id, "Ответьте на это сообщение")
     config.SALES_CHAT_ID = saved_sales
 
-    # 17. FUNNEL=0: старое поведение демо (выбор языка, приветствие компании)
+    # 16b. лид-магнит: /start checklist → сначала чек-лист со ссылкой на нужную языковую версию, потом демо
+    V5 = User(id=54, is_bot=False, first_name="Shop", language_code="ru")
+    await feed(msg("/start checklist_123456789-1700000000", V5))
+    cl = to(V5.id, "Чек-лист")
+    assert cl and "adrenalinegrowth.com/checklist" in cl[-1]["text"] and "/ru/" not in cl[-1]["text"]   # новый: uk
+    assert "10." in cl[-1]["text"] and "демо" in last(V5.id)["text"] and (await sales.get(V5.id))["source"] == "checklist"
+    await feed(msg("/start checklist", V2))                                 # V2 уже писал по-русски: чек-лист на ru
+    assert "adrenalinegrowth.com/ru/checklist" in to(V2.id, "Чек-лист")[-1]["text"]
+    V6 = User(id=55, is_bot=False, first_name="Ua", language_code="uk")
+    await feed(msg("/start checklist", V6))
+    assert "adrenalinegrowth.com/checklist" in to(V6.id, "Чек-лист")[-1]["text"]
+
+    # 16c. ответы ИИ: markdown не показывается звёздочками, HTML экранируется
+    assert ai.to_html("**Цена:** 500 ₴ <b>") == "<b>Цена:</b> 500 ₴ &lt;b&gt;"
+    assert ai.to_html("## Прайс\n* стрижка — 500\n- укладка") == "Прайс\n• стрижка — 500\n• укладка"
+    assert "*" not in ai.to_html("**незакрытый жирный")
+    V7 = User(id=56, is_bot=False, first_name="Md", language_code="ru")
+    await feed(msg("/start", V7))
+    await feed(cbq("fn:salon", V7))
+    ai.client = ScriptedClient(say("**Стрижка** стоит 500 ₴."))
+    await feed(msg("сколько стоит стрижка", V7))
+    assert "<b>Стрижка</b> стоит 500 ₴." in to(V7.id, "Стрижка")[-1]["text"]
+
+    # 16d. дни недели: неделя вперёд с названиями дней — «на четверг» в четверг = следующий четверг
+    days = ai.upcoming_days()
+    today = ai._now().date()
+    assert len(days) == 7 and days[0] == today + timedelta(days=1) and days[-1] == today + timedelta(days=7)
+    assert days[-1].weekday() == today.weekday()
+    dyn = await ai.dynamic_system("salon", {}, [])
+    assert ai.WD_RU[today.weekday()] in dyn and f"{days[-1]:%d.%m}" in dyn and "Thursday" not in dyn
+    assert "уже прошёл" in ai.static_system("salon") and "ближайший такой день" in ai.static_system("salon")
+
+    # 16e. подсказка «попробуйте записаться» не вклинивается в запись
+    ai.client = ScriptedClient(say("Конечно! На какую услугу записать?"), say("Отлично, Анна."),
+                               say("Напишите, пожалуйста, ваш номер телефона."))
+    await feed(msg("запишите меня на завтра", V7))
+    await feed(msg("Анна", V7))
+    await feed(msg("на стрижку", V7))
+    assert not to(V7.id, "Попробуйте записаться")
+    V8 = User(id=57, is_bot=False, first_name="Q", language_code="ru")
+    await feed(msg("/start", V8))
+    await feed(cbq("fn:salon", V8))
+    ai.client = ScriptedClient(say("Стрижка 500 ₴."), say("Мы на Шевченко, 5."), say("Напишите ваш телефон."),
+                               say("Работаем ежедневно 10–20."))
+    for q_ in ("цена стрижки", "где вы", "а маникюр", "до скольки работаете"):
+        await feed(msg(q_, V8))
+    assert len(to(V8.id, "Попробуйте записаться")) == 1
+    seq = [x["text"] for x in to(V8.id)]
+    assert seq.index(to(V8.id, "Попробуйте записаться")[0]["text"]) > seq.index("Работаем ежедневно 10–20.")
+
+    # 16f. ИИ спросил телефон, клиент прислал контакт → номер в профиль и ИИ продолжает запись
+    ai.client = ScriptedClient(say("Спасибо! Записываю вас на завтра в 12:00?"))
+    await feed(msg(None, V7, contact=Contact(phone_number="+380631234567", first_name="Анна", user_id=V7.id)))
+    assert (await db.get_user(V7.id))["phone"] == "+380631234567"
+    assert "Мой номер телефона: +380631234567" in str(ai.client.calls[0]["messages"][-1]["content"])
+    assert not to(V7.id, "понимаю текст и фото") and to(V7.id, "Записываю вас")
+
+    # 16g. стартовое окно на английском: текст вместо кнопки → экран и всё дальнейшее на английском, язык запомнен
+    V9 = User(id=58, is_bot=False, first_name="Tom", language_code="uk")
+    await feed(msg("/start", V9))
+    assert "AI-адміністратора" in last(V9.id)["text"]
+    await feed(msg("050 123", V9))                                           # нейтральный текст язык не меняет
+    assert not to(V9.id, "AI assistant by ADrenaline")
+    await feed(msg("Hi, I own a barbershop and want to see how it works", V9))
+    s9 = last(V9.id)
+    assert "AI assistant by ADrenaline" in s9["text"] and ("💇 Beauty salon", "fn:salon") in buttons(s9)
+    assert (await db.get_user(V9.id))["lang"] == "en"
+    await feed(cbq("fn:salon", V9))
+    assert "Now you are the <b>customer</b>" in last(V9.id)["text"]
+    assert "👀 Owner's view" in [t for t, _ in buttons(last(V9.id))]
+    ai.client = ScriptedClient(say("Hello! How can I help?"))
+    await feed(msg("how much is a haircut?", V9))
+    assert any("английский" in b["text"] for b in ai.client.calls[0]["system"])
+    # дальнейшие экраны воронки (презентация, календарь звонка) тоже на английском
+    await feed(cbq("fpn:0", V9))
+    assert "1/6" in last(V9.id)["text"] and "Where customers are lost" in last(V9.id)["text"]
+    ai.client = ScriptedClient(say("Вітаю!"))
+    await feed(msg("Привіт", V9))                                            # вернулся на украинский
+    assert (await db.get_user(V9.id))["lang"] == "uk"
+
+    # 17. FUNNEL=0: старое поведение демо (приветствие компании на украинском, без выбора языка)
     config.FUNNEL_ENABLED = False
     V4 = User(id=53, is_bot=False, first_name="Old")
     await feed(msg("/start", V4))
-    assert "Choose your language" in last(V4.id)["text"]
+    assert "Які послуги є" in last(V4.id)["text"] and "Choose your language" not in last(V4.id)["text"]
     config.FUNNEL_ENABLED = True
 
     print("воронка ADrenaline: все проверки пройдены, отправок:", len(SENT))

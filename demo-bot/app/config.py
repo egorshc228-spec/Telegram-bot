@@ -55,7 +55,7 @@ LOYALTY_DISCOUNT = int(os.getenv("LOYALTY_DISCOUNT") or 10)
 
 # ---- Язык и напоминания ----
 # Язык по умолчанию, пока клиент не выбрал свой (и если язык его Telegram не ru/uk/en): ru, uk или en
-DEFAULT_LANG = os.getenv("DEFAULT_LANG", "ru").strip().lower()
+DEFAULT_LANG = os.getenv("DEFAULT_LANG", "uk").strip().lower()
 # Напоминания клиентам за сутки и за 2 часа до визита (0 = выключить)
 REMINDERS_ENABLED = os.getenv("REMINDERS", "1").strip().lower() not in ("0", "false", "no", "")
 REMINDER_CHECK_SECONDS = int(os.getenv("REMINDER_CHECK_SECONDS") or 300)
@@ -63,14 +63,15 @@ REMINDER_CHECK_SECONDS = int(os.getenv("REMINDER_CHECK_SECONDS") or 300)
 # ---- Воронка ADrenaline для демо (переход с сайта → демо → презентация → запись на звонок) ----
 # Работает только в DEMO_MODE. FUNNEL=0 возвращает старое поведение демо.
 FUNNEL_ENABLED = DEMO_MODE and os.getenv("FUNNEL", "1").strip().lower() not in ("0", "false", "no", "")
-# Язык воронки, если язык Telegram посетителя не ru/uk/en
-FUNNEL_LANG = os.getenv("FUNNEL_LANG", "uk").strip().lower()
 # Кому приходят записи на звонок и «горячие» посетители (Telegram ID Даниила). По умолчанию OWNER_ID
 # Может быть и ID группы «Заявки» (отрицательное число): тогда карточки и кнопки живут в группе
 SALES_CHAT_ID = int(os.getenv("SALES_CHAT_ID") or OWNER_ID or 0)
 # Telegram ID людей ADrenaline, которым можно жать кнопки карточек и /funnel в личке (через запятую)
 SALES_STAFF_IDS = {int(x) for x in os.getenv("SALES_STAFF_IDS", "").replace(" ", "").split(",") if x.lstrip("-").isdigit()}
 SALES_TG = os.getenv("SALES_TG", "conversion_wizard").lstrip("@")   # ник для кнопки «Написать Даниилу»
+# Постоянная ссылка на комнату Google Meet Даниила (необязательно). Если задана, бот сам отправляет её клиенту
+# при записи, в подтверждении и в напоминании; без неё Даниил отправляет ссылку вручную из карточки.
+MEET_URL = os.getenv("MEET_URL", "").strip()
 SITE_URL = os.getenv("SITE_URL", "https://adrenalinegrowth.com").rstrip("/")
 # Окна для звонков: дни недели (1 = понедельник), часы, шаг, сколько дней вперёд показывать, минимум часов до звонка
 SALES_DAYS = os.getenv("SALES_DAYS", "1,2,3,4,5")

@@ -1,5 +1,6 @@
 """Telegram: без кнопок. Клиент пишет свободным текстом или присылает фото, Claude понимает запрос.
 Личный кабинет (/cabinet), профиль, отзывы, передача вопросов владельцу. Кнопки только у владельца."""
+import asyncio
 import html
 import logging
 import re
@@ -28,6 +29,10 @@ ACTIVE = ("new", "ok")
 
 class Review(StatesGroup):
     waiting = State()
+
+
+class Broadcast(StatesGroup):
+    text = State()          # владелец пишет объявление для всех клиентов
 
 
 class Reply(StatesGroup):
@@ -93,14 +98,26 @@ async def current_niche(user_or_id) -> str:
 
 
 async def touch(user) -> dict:
-    """Запоминает пользователя и язык его Telegram, возвращает строку из базы."""
-    await db.touch_user(user.id, user.username, getattr(user, "language_code", None))
+    """Запоминает пользователя, возвращает строку из базы."""
+    await db.touch_user(user.id, user.username)
     return await db.get_user(user.id) or {}
 
 
 async def ulang(user) -> str:
-    """Язык клиента: выбранный им, иначе язык Telegram, иначе по умолчанию."""
-    return i18n.resolve(await db.get_user(user.id), getattr(user, "language_code", None))
+    """Язык клиента: тот, на котором он писал в последний раз; пока не писал, украинский (по умолчанию)."""
+    return i18n.resolve(await db.get_user(user.id))
+
+
+async def sync_lang(user, text: str | None) -> str:
+    """Определяет язык сообщения (ru/uk/en) и запоминает его для клиента. Нейтральный текст
+    (цифры, имя, смайлик) язык не меняет. Возвращает актуальный язык клиента."""
+    row = await db.get_user(user.id)
+    cur = i18n.resolve(row)
+    new = i18n.detect(text)
+    if new and (new != cur or (row or {}).get("lang") != new):
+        await db.set_lang(user.id, new)
+        return new
+    return cur
 
 
 async def notify_owner(bot: Bot, text: str, markup=None) -> bool:
@@ -232,9 +249,6 @@ class ClientActions:
                                      f"{esc(l['service'])}, {l['date']} {l['time']}")
         return f"Запись №{l['id']} отменена."
 
-    async def set_language(self, lang: str):
-        await db.set_lang(self.user.id, lang)
-
     async def leave_review(self, rating: int, text: str) -> str:
         if not 1 <= rating <= 5:
             raise ValueError("Оценка должна быть от 1 до 5.")
@@ -265,6 +279,7 @@ async def send_cabinet(m: Message, user=None):
 async def converse(m: Message, bot: Bot, text: str, image: bytes | None = None):
     user = m.from_user
     await touch(user)
+    await sync_lang(user, text)
     niche = await current_niche(user)
     if not config.ANTHROPIC_API_KEY:
         return await hand_over(bot, m, niche, "ИИ не подключён (нет ключа Claude)")
@@ -281,7 +296,7 @@ async def converse(m: Message, bot: Bot, text: str, image: bytes | None = None):
     except Exception:
         log.exception("ошибка Claude")
         return await hand_over(bot, m, niche, "ИИ временно недоступен")
-    await m.answer(esc(answer)[:4000])
+    await m.answer(ai.to_html(answer))
     if actions.show_cabinet:
         await send_cabinet(m)
     if config.FUNNEL_ENABLED:
@@ -294,41 +309,13 @@ async def converse(m: Message, bot: Bot, text: str, image: bytes | None = None):
 
 # ---------- команды ----------
 
-def lang_kb():
-    return kb([[(name, f"lang:{code}") for code, name in i18n.LANGS.items()]])
-
-
 @router.message(CommandStart())
 @router.message(Command("menu"))
 async def start(m: Message, state: FSMContext):
     await state.clear()
-    row = await touch(m.from_user)
-    ai.reset(m.from_user.id)
-    if row.get("lang") not in i18n.LANGS:       # первый визит: сначала выбор языка
-        return await m.answer(t("ru", "lang_choose"), reply_markup=lang_kb())
-    await m.answer(welcome(await current_niche(m.from_user), row["lang"]))
-
-
-@router.message(Command("language", "lang"))
-async def language_cmd(m: Message):
     await touch(m.from_user)
-    await m.answer(t("ru", "lang_choose"), reply_markup=lang_kb())
-
-
-@router.callback_query(F.data.regexp(r"^lang:(ru|uk|en)$"))
-async def pick_language(cb: CallbackQuery):
-    lang = cb.data.split(":")[1]
-    row = await touch(cb.from_user)
-    first = row.get("lang") not in i18n.LANGS
-    await db.set_lang(cb.from_user.id, lang)
-    name = i18n.LANGS[lang]
-    try:
-        await cb.message.edit_text(t(lang, "lang_set_first" if first else "lang_changed", name=name))
-    except TelegramBadRequest:
-        pass
-    if first:
-        await cb.message.answer(welcome(await current_niche(cb.from_user), lang))
-    await cb.answer()
+    ai.reset(m.from_user.id)
+    await m.answer(welcome(await current_niche(m.from_user), await ulang(m.from_user)))
 
 
 @router.message(Command("salon", "auto", "shop", "dental"))
@@ -420,7 +407,7 @@ async def report_view(m: Message):
     leads = await db.leads_for(m.from_user.id, k)
     if not leads:
         return await m.answer(t(lang, "report_need"))
-    await m.answer_document(BufferedInputFile(leads_to_xlsx(leads), "zayavki.xlsx"),
+    await m.answer_document(BufferedInputFile(leads_to_xlsx(leads, lang), "zayavki.xlsx"),
                             caption=t(lang, "report_caption"))
 
 
@@ -455,7 +442,60 @@ async def stats(m: Message):
 @router.message(Command("leads"))
 async def all_leads(m: Message):
     if _is_owner(m):
-        await m.answer_document(BufferedInputFile(leads_to_xlsx(await db.all_leads()), "all_leads.xlsx"))
+        await m.answer_document(BufferedInputFile(leads_to_xlsx(await db.all_leads(), "ru"), "all_leads.xlsx"))
+
+
+@router.message(Command("broadcast", "announce"))
+async def broadcast_cmd(m: Message, command: CommandObject, state: FSMContext):
+    """Только владелец: /broadcast текст (или просто /broadcast и следующим сообщением текст)."""
+    if not _is_owner(m):
+        return
+    await state.clear()
+    text = (command.args or "").strip()
+    if not text:
+        await state.set_state(Broadcast.text)
+        return await m.answer("📢 Напишите текст объявления для всех клиентов бота (отмена: /cancel).")
+    await broadcast_preview(m, state, text)
+
+
+@router.message(Broadcast.text, F.text, ~F.text.startswith("/"))
+async def broadcast_text(m: Message, state: FSMContext):
+    if not _is_owner(m):
+        return
+    await broadcast_preview(m, state, m.text.strip())
+
+
+async def broadcast_preview(m: Message, state: FSMContext, text: str):
+    text = text[:3500]
+    n = len([u for u in await db.all_user_ids() if u != config.OWNER_ID])
+    await state.set_state(None)
+    await state.update_data(bc_text=text)
+    await m.answer(f"📢 <b>Так увидят клиенты</b> (получателей: {n}):\n\n{esc(text)}",
+                   reply_markup=kb([[(f"✅ Отправить всем ({n})", "bc:go"), ("❌ Отмена", "bc:no")]]))
+
+
+@router.callback_query(F.data.regexp(r"^bc:(go|no)$"))
+async def broadcast_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not (config.OWNER_ID and cb.from_user.id == config.OWNER_ID):
+        return await cb.answer("Только для владельца.", show_alert=True)
+    data = await state.get_data()
+    text = data.get("bc_text")
+    await state.update_data(bc_text=None)
+    await cb.answer()
+    if cb.data == "bc:no" or not text:
+        return await cb.message.edit_text("Рассылка отменена." if text else "Текст не найден, начните заново: /broadcast")
+    await cb.message.edit_text("⏳ Отправляю…")
+    ok = fail = 0
+    for uid in await db.all_user_ids():
+        if uid == config.OWNER_ID:
+            continue
+        try:
+            await bot.send_message(uid, "📢 " + esc(text))
+            ok += 1
+        except Exception:                      # заблокировал бота и т.п.
+            fail += 1
+        await asyncio.sleep(0.05)              # лимит Telegram ~30 сообщений в секунду
+    await cb.message.edit_text(f"✅ Рассылка отправлена: доставлено {ok}, не доставлено {fail}.")
 
 
 @router.message(Command("reviews"))
@@ -543,7 +583,8 @@ async def owner_reply_send(m: Message, state: FSMContext, bot: Bot):
 
 @router.message(Review.waiting, F.text, ~F.text.startswith("/"))
 async def review_text(m: Message, state: FSMContext, bot: Bot):
-    lang = await ulang(m.from_user)
+    await touch(m.from_user)
+    lang = await sync_lang(m.from_user, m.text)
     rating, comment = parse_review(m.text)
     if rating is None:
         return await m.answer(t(lang, "review_need_rating"))
@@ -557,6 +598,22 @@ async def review_text(m: Message, state: FSMContext, bot: Bot):
 async def on_photo(m: Message, bot: Bot):
     buf = await bot.download(m.photo[-1])
     await converse(m, bot, m.caption or "", buf.read())
+
+
+MY_PHONE = {"ru": "Мой номер телефона: {p}", "uk": "Мій номер телефону: {p}", "en": "My phone number: {p}"}
+
+
+@router.message(F.contact)
+async def on_contact(m: Message, bot: Bot):
+    """Клиент поделился контактом (скрепка → Контакт), когда ИИ спросил телефон: сохраняем номер в профиль
+    и продолжаем диалог так, будто клиент написал номер текстом."""
+    c = m.contact
+    if c.user_id and c.user_id != m.from_user.id:            # чужой контакт — просто передаём ИИ как текст
+        return await converse(m, bot, f"{c.first_name or ''} {c.phone_number}".strip())
+    await touch(m.from_user)
+    await db.set_profile(m.from_user.id, None, c.phone_number)
+    lang = await ulang(m.from_user)
+    await converse(m, bot, MY_PHONE.get(lang, MY_PHONE["ru"]).format(p=c.phone_number))
 
 
 @router.message(F.text, ~F.text.startswith("/"))

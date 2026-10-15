@@ -12,11 +12,11 @@ from datetime import date, datetime, timedelta
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (BufferedInputFile, CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
-                           KeyboardButton, Message, ReplyKeyboardMarkup)
+                           KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
 from . import ai, analytics, config, db, i18n, reminders, sales
 from . import bot as core
@@ -36,8 +36,17 @@ MISS_SHARE = 0.15                          # нижняя граница оце�
 CLOSE_SHARE = 0.2                          # допущение: каждый пятый из потерянных стал бы клиентом
 SLIDES = 6
 SOURCE_NAMES = {"ai": "сайт /ai-admin", "home": "сайт, главная", "ads": "сайт /google-ads",
+                "checklist": "чек-лист на сайте", "dm": "рассылка Дани", "call": "ссылка со созвона",
                 "direct": "напрямую в Telegram (не с сайта)"}
 FMT_RU = {"tg": "звонок в Telegram", "meet": "Google Meet", "phone": "по телефону"}
+BOOKING_WORDS = re.compile(r"запис|запиш|бронь|заброн|book", re.I)
+ASKING = re.compile(r"\?|телефон|номер|ім.я|имя|напишіть|напишите|уточн|підтверд|подтверд|оберіть|выберите|"
+                    r"який час|какое время|на коли|на когда|phone|name", re.I)
+
+
+def asks_something(answer: str) -> bool:
+    """Бот в этом ответе что-то спрашивает или ждёт данных (идёт запись) — не перебиваем подсказками."""
+    return bool(ASKING.search(answer or ""))
 
 
 class FunnelSG(StatesGroup):
@@ -78,17 +87,6 @@ def write_btn(lang: str):
     return (ft(lang, "btn_write"), f"url:https://t.me/{config.SALES_TG}")
 
 
-def funnel_lang(code: str | None) -> str:
-    c = (code or "").lower()
-    if c.startswith("uk"):
-        return "uk"
-    if c.startswith(("ru", "be")):
-        return "ru"
-    if c.startswith("en"):
-        return "en"
-    return config.FUNNEL_LANG if config.FUNNEL_LANG in i18n.LANGS else "uk"
-
-
 def is_staff(uid: int, chat_id: int | None = None) -> bool:
     """Свои: владелец демо, люди из SALES_STAFF_IDS, личка SALES_CHAT_ID или любой участник группы «Заявки»."""
     if chat_id is not None and config.SALES_CHAT_ID < 0 and chat_id == config.SALES_CHAT_ID:
@@ -127,9 +125,10 @@ def money(n: float) -> str:
 
 def when_text(dt: datetime, lang: str) -> str:
     wd = i18n.WEEKDAYS.get(lang, i18n.WEEKDAYS["uk"])[dt.weekday()]
-    word = "в" if lang == "ru" else "о"
+    word = {"ru": "в", "uk": "о", "en": "at"}.get(lang, "о")
     delta = (dt.date() - sales.now().date()).days
-    rel = {0: {"ru": "сегодня", "uk": "сьогодні"}, 1: {"ru": "завтра", "uk": "завтра"}}.get(delta, {}).get(lang, "")
+    rel = {0: {"ru": "сегодня", "uk": "сьогодні", "en": "today"},
+           1: {"ru": "завтра", "uk": "завтра", "en": "tomorrow"}}.get(delta, {}).get(lang, "")
     return (f"{rel}, " if rel else "") + f"{wd} {dt:%d.%m} {word} {dt:%H:%M}"
 
 
@@ -140,6 +139,8 @@ def fmt_label(lang: str, fmt: str) -> str:
 def times_word(x: int, lang: str) -> str:
     """«у 3 рази», «у 5 разів» / «в 3 раза», «в 5 раз»."""
     few = x % 10 in (2, 3, 4) and x % 100 not in (12, 13, 14)
+    if lang == "en":
+        return "times"
     if lang == "ru":
         return "раза" if few else "раз"
     return "рази" if few else "разів"
@@ -173,14 +174,16 @@ async def start(m: Message, command: CommandObject, state: FSMContext):
     if not on():
         raise SkipHandler
     await state.clear()
-    row = await core.touch(m.from_user)
+    await core.touch(m.from_user)
     ai.reset(m.from_user.id)
-    if row.get("lang") not in i18n.LANGS:          # без экрана выбора языка: меньше шагов до демо
-        await db.set_lang(m.from_user.id, funnel_lang(m.from_user.language_code))
     source, cid = sales.parse_payload(command.args)
     await sales.start(m.from_user.id, source, cid)
     await tracked(m.from_user.id, "bot_start", entry=source)
-    await m.answer(ft(await lang_of(m.from_user), "intro"), reply_markup=niche_kb(await lang_of(m.from_user)))
+    lang = await lang_of(m.from_user)
+    if source == "checklist":                       # лид-магнит с сайта: сначала чек-лист, потом демо
+        url = "https://adrenalinegrowth.com/ru/checklist" if lang == "ru" else "https://adrenalinegrowth.com/checklist"
+        await m.answer(ft(lang, "checklist", url=url), disable_web_page_preview=True)
+    await m.answer(ft(lang, "intro"), reply_markup=niche_kb(lang))
 
 
 @router.callback_query(F.data.regexp(r"^fn:(salon|dental|auto|shop|other)$"))
@@ -194,10 +197,23 @@ async def pick_niche(cb: CallbackQuery, state: FSMContext):
     await choose_niche(cb.message, cb.from_user, k, lang)
 
 
+@router.message(StateFilter(None), F.chat.type == "private", F.text, ~F.text.startswith("/"))
+async def start_window_text(m: Message):
+    """Человек не нажал кнопку сферы, а написал текст на стартовом экране: переводим экран на язык сообщения."""
+    if not on():
+        raise SkipHandler
+    p = await sales.get(m.from_user.id)
+    if (not p or (p.get("stage") or "start") != "start" or i18n.detect(m.text) is None
+            or m.text in OWNER_TEXTS or m.text in CALL_TEXTS):
+        raise SkipHandler
+    lang = await core.sync_lang(m.from_user, m.text)
+    await m.answer(ft(lang, "intro"), reply_markup=niche_kb(lang))
+
+
 @router.message(FunnelSG.biz, F.text, ~F.text.startswith("/"))
 async def other_biz(m: Message, state: FSMContext):
     await state.clear()
-    lang = await lang_of(m.from_user)
+    lang = await core.sync_lang(m.from_user, m.text)
     k = guess_niche(m.text)
     await m.answer(ft(lang, "biz_mapped", title=esc(i18n.niche_view(k, lang).title)))
     await choose_niche(m, m.from_user, k, lang, biz_text=m.text[:200])
@@ -252,8 +268,13 @@ async def after_ai(bot: Bot, m: Message, actions, answer: str = "") -> None:
                 await notify_sales(bot, core.lead_card(lead, f"🧪 Посетитель записался в демо как клиент "
                                                              f"({esc(core.who(m.from_user))})"))
         return
+    if p.get("demo_booked") or p.get("nudged"):
+        return
+    if BOOKING_WORDS.search(m.text or m.caption or ""):
+        # человек уже сам записывается: подсказка «попробуйте записаться» ему не нужна ни сейчас, ни потом
+        return await sales.update(uid, nudged=1)
     # подсказку не вставляем посреди записи: если бот сейчас что-то спрашивает, ждём следующего хода
-    if n >= 3 and "?" not in (answer or "") and not p.get("demo_booked") and not p.get("nudged"):
+    if n >= 3 and not asks_something(answer):
         await sales.update(uid, nudged=1)
         await m.answer(ft(lang, "nudge_try_booking"), reply_markup=ikb([[(ft(lang, "btn_owner"), "fo:owner")]]))
 
@@ -285,9 +306,14 @@ async def show_owner(target: Message, user):
         tomorrow = (sales.now() + timedelta(days=1)).strftime("%d.%m")
         await target.answer(ft(lang, "owner_sample", company=esc(n.company), service=esc(n.services[0]),
                                date=tomorrow))
-    await target.answer(ft(lang, "owner_explain"), reply_markup=ikb([
-        [(ft(lang, "btn_report"), "fo:report"), (ft(lang, "btn_remind"), "fo:remind")],
-        [(ft(lang, "btn_pitch"), "fpn:0")]]))
+    p = await sales.get(user.id) or {}
+    rows = [[(ft(lang, "btn_report"), "fo:report"), (ft(lang, "btn_remind"), "fo:remind")]]
+    seen = p.get("pitch_seen") if p.get("pitch_seen") is not None else -1
+    if seen < SLIDES - 1:                     # презентацию ещё не досмотрел — предлагаем её
+        rows.append([(ft(lang, "btn_pitch"), "fpn:0")])
+    elif not await sales.active_call(user.id):  # досмотрел, но не записан — сразу запись на звонок
+        rows.append([(ft(lang, "btn_book"), "fb:go")])
+    await target.answer(ft(lang, "owner_explain"), reply_markup=ikb(rows))
     await sales.update(user.id, owner_seen=1)
     await sales.advance(user.id, "owner")
     await sales.touch(user.id)
@@ -526,13 +552,44 @@ async def pick_format(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await cb.message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest:
         pass
+    old = await sales.active_call(cb.from_user.id)
+    if old:
+        # уже есть звонок (нажали старые кнопки времени): молча второй не создаём и не переносим — спрашиваем
+        return await cb.message.answer(
+            ft(lang, "move_confirm", old=when_text(datetime.fromisoformat(old["at"]), lang),
+               new=when_text(parse_stamp(stamp), lang), fmt=fmt_label(lang, fmt)),
+            reply_markup=ikb([[(ft(lang, "btn_move_yes"), f"fm:{fmt}:{stamp}")],
+                              [(ft(lang, "btn_move_keep"), "fm:keep")]]))
+    await go_format(bot, cb.message, cb.from_user, lang, fmt, stamp, state)
+
+
+async def go_format(bot: Bot, target: Message, user, lang: str, fmt: str, stamp: str, state: FSMContext,
+                    replace: int | None = None):
     if fmt == "phone":
         await state.set_state(FunnelSG.phone)
-        await state.update_data(stamp=stamp)
+        await state.update_data(stamp=stamp, replace=replace)
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=ft(lang, "btn_share_phone"), request_contact=True)]],
                                  resize_keyboard=True, one_time_keyboard=True)
-        return await cb.message.answer(ft(lang, "ask_phone"), reply_markup=kb)
-    await book(bot, cb.message, cb.from_user, lang, parse_stamp(stamp), fmt)
+        return await target.answer(ft(lang, "ask_phone"), reply_markup=kb)
+    await book(bot, target, user, lang, parse_stamp(stamp), fmt, replace=replace)
+
+
+@router.callback_query(F.data.regexp(r"^fm:(keep|(tg|meet|phone):\d{4}-\d\d-\d\dT\d{4})$"))
+async def move_call(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    lang = await lang_of(cb.from_user)
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    old = await sales.active_call(cb.from_user.id)
+    if cb.data == "fm:keep":
+        if old:
+            await cb.message.answer(ft(lang, "move_kept", when=when_text(datetime.fromisoformat(old["at"]), lang)),
+                                    reply_markup=call_kb(lang, old["id"]))
+        return
+    _, fmt, stamp = cb.data.split(":", 2)
+    await go_format(bot, cb.message, cb.from_user, lang, fmt, stamp, state, replace=old["id"] if old else None)
 
 
 @router.message(FunnelSG.phone, F.contact)
@@ -540,7 +597,7 @@ async def got_contact(m: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     await state.clear()
     await book(bot, m, m.from_user, await lang_of(m.from_user), parse_stamp(data["stamp"]), "phone",
-               m.contact.phone_number)
+               m.contact.phone_number, replace=data.get("replace"))
 
 
 @router.message(FunnelSG.phone, F.text, ~F.text.startswith("/"))
@@ -550,29 +607,79 @@ async def got_phone_text(m: Message, state: FSMContext, bot: Bot):
         return await m.answer(ft(lang, "bad_phone"))
     data = await state.get_data()
     await state.clear()
-    await book(bot, m, m.from_user, lang, parse_stamp(data["stamp"]), "phone", m.text.strip()[:30])
+    await book(bot, m, m.from_user, lang, parse_stamp(data["stamp"]), "phone", m.text.strip()[:30],
+               replace=data.get("replace"))
+
+
+@router.message(F.contact, F.chat.type == "private")
+async def contact_outside_booking(m: Message, bot: Bot):
+    """Контакт прислали не на шаге «номер для звонка». Если есть звонок без номера — прикрепляем номер к нему.
+    Дальше (или если ИИ в демо как раз спросил телефон) контакт уходит в обычный диалог: bot.on_contact."""
+    if not on():
+        raise SkipHandler
+    c = await sales.active_call(m.from_user.id)
+    own = not m.contact.user_id or m.contact.user_id == m.from_user.id
+    if not (c and own and not c.get("phone")):
+        raise SkipHandler
+    phone = m.contact.phone_number
+    await sales.set_call_phone(c["id"], phone)
+    await db.set_profile(m.from_user.id, None, phone)
+    at = datetime.fromisoformat(c["at"])
+    await notify_sales(bot, f"📱 {esc(core.who(m.from_user))} прислал номер {esc(phone)} к звонку "
+                            f"{when_text(at, 'ru')} ({FMT_RU.get(c['format'], c['format'])})")
+    last_bot = next((h["content"] for h in reversed(ai.recent(m.from_user.id, await core.current_niche(m.from_user)))
+                     if h["role"] == "assistant"), "")
+    if re.search(r"телефон|номер|phone", str(last_bot), re.I):
+        raise SkipHandler                      # ИИ в демо ждёт номер для записи клиента — пусть продолжит
+    lang = await lang_of(m.from_user)
+    await m.answer(ft(lang, "phone_added", phone=esc(phone), when=when_text(at, lang)),
+                   reply_markup=ReplyKeyboardRemove())
 
 
 def call_kb(lang: str, call_id: int) -> InlineKeyboardMarkup:
     return ikb([[(ft(lang, "btn_resched"), f"fb:re:{call_id}"), (ft(lang, "btn_cancel_call"), f"fb:x:{call_id}")]])
 
 
-async def book(bot: Bot, target: Message, user, lang: str, at: datetime, fmt: str, phone: str = ""):
+def next_step(lang: str, fmt: str) -> str:
+    if fmt == "meet" and config.MEET_URL:
+        return ft(lang, "next_meet_url", url=esc(config.MEET_URL))
+    return ft(lang, "next_" + fmt) if fmt in ("tg", "meet", "phone") else ""
+
+
+def meet_line(lang: str, fmt: str) -> str:
+    return ft(lang, "meet_link", url=esc(config.MEET_URL)) if fmt == "meet" and config.MEET_URL else ""
+
+
+async def book(bot: Bot, target: Message, user, lang: str, at: datetime, fmt: str, phone: str = "",
+               replace: int | None = None):
+    """Запись на звонок. replace — id звонка, который человек подтвердил перенести на это время."""
+    old = await sales.get_call(replace) if replace else None
+    if old and old["status"] not in ("booked", "confirmed"):
+        old = None
+    if old and old["at"] == sales._iso(at):            # то же время, другой формат: сначала освобождаем окно
+        await sales.set_call_status(old["id"], "resched")
     try:
         call_id = await sales.book_call(user.id, user.username, user.full_name, at, fmt, phone)
     except ValueError:
         return await show_days(target, user, lang, "slot_taken")
+    moved = ""
+    if old:
+        await sales.set_call_status(old["id"], "resched")
+        await sales.update(user.id, call_id=call_id)
+        moved = when_text(datetime.fromisoformat(old["at"]), "ru")
     if phone:
         await db.set_profile(user.id, None, phone)
     await tracked(user.id, "call_booked", fmt=fmt)
-    await target.answer(ft(lang, "booked", when=when_text(at, lang), fmt=fmt_label(lang, fmt),
-                           next=ft(lang, "next_" + fmt) if fmt in ("tg", "meet", "phone") else ""),
-                        reply_markup=call_kb(lang, call_id))
-    todo = {"meet": "🔗 Нужна ссылка на Google Meet: создай встречу и отправь кнопкой «Написать через бота»",
-            "phone": "☎️ Позвонить на номер выше",
-            "tg": "📞 Позвонить в Telegram"}.get(fmt, "")
-    card = (f"📞 <b>Запись на звонок</b> — {when_text(at, 'ru')} (Киев), {FMT_RU.get(fmt, fmt)}"
-            + (f"\n📱 {esc(phone)}" if phone else "") + "\n" + await prospect_card(user)
+    head = ft(lang, "moved_from", old=when_text(datetime.fromisoformat(old["at"]), lang)) if old else ""
+    await target.answer(head + ft(lang, "booked", when=when_text(at, lang), fmt=fmt_label(lang, fmt),
+                                  next=next_step(lang, fmt)),
+                        reply_markup=call_kb(lang, call_id), disable_web_page_preview=True)
+    meet_todo = (f"🔗 Клиенту отправлена ссылка: {esc(config.MEET_URL)}" if config.MEET_URL else
+                 "🔗 Нужна ссылка на Google Meet: создай встречу и отправь кнопкой «Написать через бота»")
+    todo = {"meet": meet_todo, "phone": "☎️ Позвонить на номер выше", "tg": "📞 Позвонить в Telegram"}.get(fmt, "")
+    title = (f"🔁 <b>Перенос звонка</b> с {moved} → {when_text(at, 'ru')} (Киев), {FMT_RU.get(fmt, fmt)}" if moved
+             else f"📞 <b>Запись на звонок</b> — {when_text(at, 'ru')} (Киев), {FMT_RU.get(fmt, fmt)}")
+    card = (title + (f"\n📱 {esc(phone)}" if phone else "") + "\n" + await prospect_card(user)
             + (f"\n\n{todo}" if todo else ""))
     await notify_sales(bot, card, ikb([[("✅ Подтвердить", f"sc:ok:{call_id}"), ("🔁 Другое время", f"sc:re:{call_id}")],
                                        [("✉️ Написать через бота", f"sr:{user.id}")]]))
@@ -619,7 +726,8 @@ async def sales_action(cb: CallbackQuery, bot: Bot):
     try:
         if act == "ok":
             await sales.set_call_status(c["id"], "confirmed")
-            await bot.send_message(c["user_id"], ft(ulang, "call_confirmed", when=when_text(at, ulang)))
+            await bot.send_message(c["user_id"], ft(ulang, "call_confirmed", when=when_text(at, ulang))
+                                   + meet_line(ulang, c["format"]), disable_web_page_preview=True)
             note = "✅ Подтверждено, клиенту отправлено"
         else:
             await sales.set_call_status(c["id"], "resched")
@@ -772,8 +880,8 @@ async def run_once(bot: Bot, at: datetime | None = None) -> dict:
         at_dt = datetime.fromisoformat(c["at"])
         try:
             await bot.send_message(c["user_id"], ft(lang, "call_reminder", when=when_text(at_dt, lang),
-                                                    fmt=fmt_label(lang, c["format"])),
-                                   reply_markup=call_kb(lang, c["id"]))
+                                                    fmt=fmt_label(lang, c["format"])) + meet_line(lang, c["format"]),
+                                   reply_markup=call_kb(lang, c["id"]), disable_web_page_preview=True)
             sent["reminders"] += 1
         except Exception:
             log.warning("напоминание о звонке №%s не отправлено", c["id"], exc_info=True)

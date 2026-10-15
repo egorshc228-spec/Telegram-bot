@@ -68,6 +68,11 @@ async def touch_user(user_id: int, username: str | None, tg_lang: str | None = N
         await db.commit()
 
 
+async def all_user_ids() -> list[int]:
+    """Все, кто хоть раз писал боту (для рассылки владельца)."""
+    return [r["user_id"] for r in await _rows("SELECT user_id FROM users ORDER BY user_id")]
+
+
 async def get_user(user_id: int):
     r = await _rows("SELECT * FROM users WHERE user_id=?", (user_id,))
     return r[0] if r else None

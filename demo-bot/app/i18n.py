@@ -14,27 +14,55 @@ LANGS = {"ru": "Русский", "uk": "Українська", "en": "English"}
 
 
 def default_lang() -> str:
-    return config.DEFAULT_LANG if config.DEFAULT_LANG in LANGS else "ru"
+    return config.DEFAULT_LANG if config.DEFAULT_LANG in LANGS else "uk"
 
 
-def guess(code: str | None) -> str:
-    """Язык по языковому коду Telegram клиента (uk-UA, ru, en-US ...)."""
-    c = (code or "").lower()
-    if c.startswith("uk"):
-        return "uk"
-    if c.startswith(("ru", "be")):
-        return "ru"
-    if c.startswith("en"):
-        return "en"
-    return default_lang()
+_UK_LETTERS = set("іїєґІЇЄҐ")
+_RU_LETTERS = set("ыэъёЫЭЪЁ")
+_UK_WORDS = {"що", "як", "дякую", "дякуємо", "будь", "ласка", "добрий", "день", "вітаю", "привіт", "хочу",
+             "потрібно", "можна", "скільки", "коли", "мені", "мене", "мій", "моя", "мої", "так", "ні",
+             "записати", "запишіть", "скасуйте", "кабінет", "послуги", "ціна", "години", "завтра", "сьогодні"}
+_RU_WORDS = {"что", "как", "спасибо", "пожалуйста", "здравствуйте", "привет", "хочу", "нужно", "можно",
+             "сколько", "когда", "мне", "меня", "мой", "моя", "мои", "да", "нет", "записать", "запишите",
+             "отмените", "кабинет", "услуги", "цена", "время", "завтра", "сегодня", "добрый", "день"}
+_EN_WORDS = {"i", "the", "a", "an", "to", "want", "book", "hello", "hi", "hey", "please", "my", "is", "are",
+             "can", "could", "you", "what", "how", "price", "prices", "thanks", "thank", "yes", "no",
+             "appointment", "booking", "cancel", "tomorrow", "today", "when", "do", "need", "would", "like",
+             "cabinet", "account", "services", "me", "for", "at", "on", "and"}
+
+
+def detect(text: str | None) -> str | None:
+    """Язык сообщения клиента (ru/uk/en) или None, если по тексту не понять (цифры, имя, команда, один смайлик).
+    Тогда остаётся язык, который клиент использовал раньше."""
+    s = (text or "").strip()
+    if not s or s.startswith("/"):
+        return None
+    cyr = sum(1 for ch in s if "а" <= ch.lower() <= "я" or ch in "іїєґёІЇЄҐЁ")
+    lat = sum(1 for ch in s if "a" <= ch.lower() <= "z")
+    words = re.findall(r"[^\W\d_]+", s.lower())
+    if cyr > lat:
+        uk = 3 * sum(ch in _UK_LETTERS for ch in s) + 2 * sum(w in _UK_WORDS for w in words)
+        ru = 3 * sum(ch in _RU_LETTERS for ch in s) + 2 * sum(w in _RU_WORDS for w in words)
+        if uk > ru:
+            return "uk"
+        if ru > uk:
+            return "ru"
+        # ни букв-маркеров, ни слов: кириллица без признаков украинского считается русской
+        return "ru" if uk == 0 and cyr >= 4 and not (set(words) & _UK_WORDS) else None
+    if lat > cyr and lat >= 2:
+        lw = [w for w in words if re.fullmatch(r"[a-z']+", w)]
+        if set(lw) & _EN_WORDS or len(lw) >= 3:
+            return "en"
+    return None
 
 
 def resolve(row: dict | None, tg_code: str | None = None) -> str:
-    """Язык клиента: выбранный им, иначе по языку его Telegram, иначе язык по умолчанию."""
+    """Язык клиента: тот, на котором он писал последний раз (хранится в базе), иначе язык по умолчанию (украинский).
+    Язык интерфейса Telegram больше не используется. Параметр tg_code оставлен для совместимости."""
     row = row or {}
     if row.get("lang") in LANGS:
         return row["lang"]
-    return guess(tg_code or row.get("tg_lang"))
+    return default_lang()
 
 
 def t(lang: str, key: str, **kw) -> str:
@@ -46,27 +74,6 @@ def t(lang: str, key: str, **kw) -> str:
 # ---------------------------------------------------------------- тексты
 
 TEXTS = {
-    # --- выбор языка
-    "lang_choose": {
-        "ru": "🌐 Выберите язык · Оберіть мову · Choose your language",
-        "uk": "🌐 Выберите язык · Оберіть мову · Choose your language",
-        "en": "🌐 Выберите язык · Оберіть мову · Choose your language",
-    },
-    "lang_set_first": {
-        "ru": "✅ Язык: {name}",
-        "uk": "✅ Мова: {name}",
-        "en": "✅ Language: {name}",
-    },
-    "lang_changed": {
-        "ru": "✅ Язык: {name}. Напишите, что вам нужно.",
-        "uk": "✅ Мова: {name}. Напишіть, що вам потрібно.",
-        "en": "✅ Language: {name}. Tell me what you need.",
-    },
-    "lang_tool_ok": {
-        "ru": "Язык переключён на {name}. Дальше отвечай клиенту на этом языке.",
-        "uk": "Язык переключён на {name}. Дальше отвечай клиенту на этом языке.",
-        "en": "Язык переключён на {name}. Дальше отвечай клиенту на этом языке.",
-    },
     # --- приветствие
     "welcome": {
         "ru": (
@@ -83,8 +90,7 @@ TEXTS = {
             "• если не смогу помочь, спрошу у владельца\n\n"
             "<b>Как пользоваться</b>\nКнопок нет: просто напишите сообщение или пришлите фото, "
             "как живому администратору. Например:\n{examples}\n\n"
-            "Команды: /cabinet — личный кабинет · /profile — мои данные · /review — оставить отзыв · "
-            "/language — язык"
+            "Команды: /cabinet — личный кабинет · /profile — мои данные · /review — оставить отзыв\n\n🌐 Можно писать по-украински, по-русски или по-английски — отвечу на вашем языке."
         ),
         "uk": (
             "👋 Вітаю! Я AI-адміністратор — <b>{company}</b>.\n{about}\n\n"
@@ -100,8 +106,7 @@ TEXTS = {
             "• якщо не зможу допомогти, запитаю у власника\n\n"
             "<b>Як користуватися</b>\nКнопок немає: просто напишіть повідомлення або надішліть фото, "
             "як живому адміністратору. Наприклад:\n{examples}\n\n"
-            "Команди: /cabinet — особистий кабінет · /profile — мої дані · /review — залишити відгук · "
-            "/language — мова"
+            "Команди: /cabinet — особистий кабінет · /profile — мої дані · /review — залишити відгук\n\n🌐 Можна писати українською, російською або англійською — відповім вашою мовою."
         ),
         "en": (
             "👋 Hello! I'm the AI assistant of <b>{company}</b>.\n{about}\n\n"
@@ -117,8 +122,7 @@ TEXTS = {
             "• if I can't help, I'll ask the owner\n\n"
             "<b>How to use</b>\nThere are no buttons: just write a message or send a photo, "
             "as you would to a real receptionist. For example:\n{examples}\n\n"
-            "Commands: /cabinet — your account · /profile — your details · /review — leave a review · "
-            "/language — language"
+            "Commands: /cabinet — your account · /profile — your details · /review — leave a review\n\n🌐 You can write in Ukrainian, Russian or English — I'll reply in your language."
         ),
     },
     "welcome_demo": {
@@ -226,20 +230,17 @@ TEXTS = {
                "Эти данные подставляются в запись автоматически, поэтому я не спрашиваю их каждый раз.\n\n"
                "<b>Как изменить</b>\n"
                "• словами: «изменить имя на Анна», «мой новый номер 050 123 45 67»\n"
-               "• или командой: <code>/name Анна</code> и <code>/phone 0501234567</code>\n"
-               "• язык: /language"),
+               "• или командой: <code>/name Анна</code> и <code>/phone 0501234567</code>"),
         "uk": ("👤 <b>Ваші дані</b>\nІм'я: {name}\nТелефон: {phone}\n\n"
                "Ці дані підставляються в запис автоматично, тому я не питаю їх щоразу.\n\n"
                "<b>Як змінити</b>\n"
                "• словами: «змінити ім'я на Анна», «мій новий номер 050 123 45 67»\n"
-               "• або командою: <code>/name Анна</code> і <code>/phone 0501234567</code>\n"
-               "• мова: /language"),
+               "• або командою: <code>/name Анна</code> і <code>/phone 0501234567</code>"),
         "en": ("👤 <b>Your details</b>\nName: {name}\nPhone: {phone}\n\n"
                "These details are filled into bookings automatically, so I don't ask for them every time.\n\n"
                "<b>How to change</b>\n"
                "• in words: \"change my name to Anna\", \"my new number is 050 123 45 67\"\n"
-               "• or with commands: <code>/name Anna</code> and <code>/phone 0501234567</code>\n"
-               "• language: /language"),
+               "• or with commands: <code>/name Anna</code> and <code>/phone 0501234567</code>"),
     },
     "not_set_name": {"ru": "не указано", "uk": "не вказано", "en": "not set"},
     "not_set_phone": {"ru": "не указан", "uk": "не вказано", "en": "not set"},
@@ -412,15 +413,15 @@ TEXTS = {
     "cab_todo": {
         "ru": ("<b>Что можно сделать</b>\n"
                "• Отменить или перенести: напишите «отмени запись №…» или «перенесите на…»\n"
-               "• Изменить данные: /profile\n• Оставить отзыв: /review\n• Сменить язык: /language\n"
+               "• Изменить данные: /profile\n• Оставить отзыв: /review\n"
                "• Напоминания придут за сутки и за 2 часа до визита"),
         "uk": ("<b>Що можна зробити</b>\n"
                "• Скасувати або перенести: напишіть «скасуй запис №…» або «перенесіть на…»\n"
-               "• Змінити дані: /profile\n• Залишити відгук: /review\n• Змінити мову: /language\n"
+               "• Змінити дані: /profile\n• Залишити відгук: /review\n"
                "• Нагадування прийдуть за добу та за 2 години до візиту"),
         "en": ("<b>What you can do</b>\n"
                "• Cancel or reschedule: write \"cancel booking #…\" or \"move it to…\"\n"
-               "• Change your details: /profile\n• Leave a review: /review\n• Change language: /language\n"
+               "• Change your details: /profile\n• Leave a review: /review\n"
                "• Reminders arrive a day and 2 hours before your visit"),
     },
     "st_new": {"ru": "⏳ ждёт подтверждения", "uk": "⏳ чекає підтвердження", "en": "⏳ awaiting confirmation"},
@@ -450,11 +451,11 @@ WEEKDAYS2 = {                     # двухбуквенные, шапка ка�
 
 COMMANDS = {
     "ru": [("start", "Начать: что я умею"), ("cabinet", "Личный кабинет: мои записи"),
-           ("profile", "Мои данные"), ("review", "Оставить отзыв"), ("language", "Язык / Language")],
+           ("profile", "Мои данные"), ("review", "Оставить отзыв")],
     "uk": [("start", "Почати: що я вмію"), ("cabinet", "Особистий кабінет: мої записи"),
-           ("profile", "Мої дані"), ("review", "Залишити відгук"), ("language", "Мова / Language")],
+           ("profile", "Мої дані"), ("review", "Залишити відгук")],
     "en": [("start", "Start: what I can do"), ("cabinet", "Your account: my bookings"),
-           ("profile", "Your details"), ("review", "Leave a review"), ("language", "Language / Мова")],
+           ("profile", "Your details"), ("review", "Leave a review")],
 }
 COMMANDS_DEMO = {
     "ru": [("owner", "Демо: заявка глазами владельца"), ("report", "Демо: Excel-отчёт"),

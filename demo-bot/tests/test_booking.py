@@ -127,9 +127,9 @@ async def test_cache_and_days():
     booking.provider("salon").transport = httpx.MockTransport(h)
     days = ai.upcoming_days()
     res = await booking.free_slots_days("salon", None, days)
-    assert len(res) == 5 and n["c"] == 5
+    assert len(res) == len(days) == 7 and n["c"] == 7
     await booking.free_slots_days("salon", None, days)
-    assert n["c"] == 5, "второй вызов должен идти из кэша"
+    assert n["c"] == 7, "второй вызов должен идти из кэша"
     # промпт ИИ получает слоты из CRM
     sysmsg = await ai.dynamic_system("salon", {}, [])
     assert "10:00" in sysmsg
