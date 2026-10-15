@@ -15,7 +15,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+from aiogram.types import (BufferedInputFile, CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
                            KeyboardButton, Message, ReplyKeyboardMarkup)
 
 from . import ai, analytics, config, db, i18n, reminders, sales
@@ -26,7 +26,8 @@ from .report import leads_to_xlsx
 
 log = logging.getLogger("funnel")
 router = Router()
-router.message.filter(F.chat.type == "private")
+# Личка посетителей + группа «Заявки» (если SALES_CHAT_ID — группа): в группе работают только ответ посетителю и /funnel
+router.message.filter(F.func(lambda m: m.chat.type == "private" or m.chat.id == config.SALES_CHAT_ID))
 esc = html.escape
 
 VOL_MID = [5, 20, 45, 60]                  # середина диапазона «обращений в день»; для «60+» — нижняя граница
@@ -88,8 +89,11 @@ def funnel_lang(code: str | None) -> str:
     return config.FUNNEL_LANG if config.FUNNEL_LANG in i18n.LANGS else "uk"
 
 
-def is_staff(uid: int) -> bool:
-    return uid in {config.OWNER_ID, config.SALES_CHAT_ID} - {0}
+def is_staff(uid: int, chat_id: int | None = None) -> bool:
+    """Свои: владелец демо, люди из SALES_STAFF_IDS, личка SALES_CHAT_ID или любой участник группы «Заявки»."""
+    if chat_id is not None and config.SALES_CHAT_ID < 0 and chat_id == config.SALES_CHAT_ID:
+        return True
+    return uid in ({config.OWNER_ID, config.SALES_CHAT_ID} | config.SALES_STAFF_IDS) - {0}
 
 
 def niche_kb(lang: str) -> InlineKeyboardMarkup:
@@ -150,6 +154,19 @@ async def tracked(user_id: int, name: str, **params):
 
 
 # ================================================================ вход
+
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def group_guard(m: Message, state: FSMContext):
+    """Группа «Заявки»: бот не ведёт там демо и не отвечает ИИ — только ответ посетителю, /cancel и /funnel."""
+    text = m.text or ""
+    in_reply = await state.get_state() == SalesReply.text.state
+    if text.startswith("/cancel") and in_reply:
+        await state.clear()
+        return await m.answer("Отменено.")
+    if in_reply or text.startswith("/funnel"):
+        raise SkipHandler
+    return
+
 
 @router.message(CommandStart())
 async def start(m: Message, command: CommandObject, state: FSMContext):
@@ -229,6 +246,11 @@ async def after_ai(bot: Bot, m: Message, actions, answer: str = "") -> None:
         await tracked(uid, "demo_booking")
         await m.answer(ft(lang, "nudge_booked"))
         await show_owner(m, m.from_user)          # сразу его собственная заявка глазами владельца
+        if config.SALES_CHAT_ID and config.SALES_CHAT_ID != config.OWNER_ID:
+            lead = await db.get_lead(actions.lead_id)
+            if lead:
+                await notify_sales(bot, core.lead_card(lead, f"🧪 Посетитель записался в демо как клиент "
+                                                             f"({esc(core.who(m.from_user))})"))
         return
     # подсказку не вставляем посреди записи: если бот сейчас что-то спрашивает, ждём следующего хода
     if n >= 3 and "?" not in (answer or "") and not p.get("demo_booked") and not p.get("nudged"):
@@ -355,7 +377,7 @@ async def calc(cb: CallbackQuery):
     month = VOL_MID[vol] * 30
     lost = round(month * MISS_SHARE)
     loss = lost * CLOSE_SHARE * CHECK_MID[j]
-    x = loss / (120 * config.USD_UAH)
+    x = loss / (160 * config.USD_UAH)
     ratio = ft(lang, "ratio", x=int(x), word=times_word(int(x), lang)) if x >= 2 else ""
     clients = round(lost * CLOSE_SHARE)
     await sales.update(cb.from_user.id, calc=f"~{lost} обращений/мес без быстрого ответа → ~{clients} клиентов "
@@ -584,7 +606,7 @@ async def user_call_action(cb: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.regexp(r"^sc:(ok|re):\d+$"))
 async def sales_action(cb: CallbackQuery, bot: Bot):
-    if not is_staff(cb.from_user.id):
+    if not is_staff(cb.from_user.id, cb.message.chat.id):
         return await cb.answer("Эта кнопка только для ADrenaline.", show_alert=True)
     _, act, cid = cb.data.split(":")
     c = await sales.get_call(int(cid))
@@ -624,12 +646,16 @@ class SimpleUser:
 
 @router.callback_query(F.data.regexp(r"^sr:\d+$"))
 async def sales_reply_start(cb: CallbackQuery, state: FSMContext):
-    if not is_staff(cb.from_user.id):
+    if not is_staff(cb.from_user.id, cb.message.chat.id):
         return await cb.answer("Эта кнопка только для ADrenaline.", show_alert=True)
     await state.set_state(SalesReply.text)
-    await state.update_data(to=int(cb.data[3:]))
+    to = int(cb.data[3:])
+    await state.update_data(to=to)
     await cb.answer()
-    await cb.message.answer("✍️ Напишите сообщение посетителю, я отправлю от имени «Даниил, ADrenaline». Отмена: /cancel")
+    who_ = await _who_id(to)
+    # ForceReply: в группе бот видит ответ на своё сообщение даже с включённым режимом приватности
+    await cb.message.answer(f"✍️ Ответьте на это сообщение — отправлю {who_} от имени «Даниил, ADrenaline». "
+                            "Отмена: /cancel", reply_markup=ForceReply(input_field_placeholder="Сообщение посетителю"))
 
 
 @router.message(SalesReply.text, F.text, ~F.text.startswith("/"))
@@ -642,7 +668,15 @@ async def sales_reply_send(m: Message, state: FSMContext, bot: Bot):
         await bot.send_message(to, ft(lang, "sales_prefix", text=esc(m.text)))
     except Exception:
         return await m.answer("Не удалось отправить: возможно, посетитель заблокировал бота.")
-    await m.answer("✅ Отправлено.")
+    await m.answer(f"✅ Отправлено {await _who_id(to)}.")
+
+
+async def _who_id(uid: int) -> str:
+    """Кому уходит сообщение: @ник или имя посетителя."""
+    u = await db.get_user(uid) or {}
+    p = await sales.get(uid) or {}
+    nick = u.get("username") or p.get("username")
+    return f"@{nick}" if nick else esc(u.get("name") or u.get("first_name") or f"id {uid}")
 
 
 async def notify_sales(bot: Bot, text: str, markup=None) -> bool:
@@ -767,7 +801,7 @@ async def loop(bot: Bot, interval: int | None = None):
 
 @router.message(Command("funnel"))
 async def funnel_stats(m: Message, command: CommandObject):
-    if not is_staff(m.from_user.id):
+    if not is_staff(m.from_user.id, m.chat.id):
         raise SkipHandler
     days = int(command.args) if (command.args or "").isdigit() else 30
     s = await sales.funnel_stats(days)

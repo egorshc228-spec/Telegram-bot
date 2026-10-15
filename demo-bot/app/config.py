@@ -66,7 +66,10 @@ FUNNEL_ENABLED = DEMO_MODE and os.getenv("FUNNEL", "1").strip().lower() not in (
 # Язык воронки, если язык Telegram посетителя не ru/uk/en
 FUNNEL_LANG = os.getenv("FUNNEL_LANG", "uk").strip().lower()
 # Кому приходят записи на звонок и «горячие» посетители (Telegram ID Даниила). По умолчанию OWNER_ID
+# Может быть и ID группы «Заявки» (отрицательное число): тогда карточки и кнопки живут в группе
 SALES_CHAT_ID = int(os.getenv("SALES_CHAT_ID") or OWNER_ID or 0)
+# Telegram ID людей ADrenaline, которым можно жать кнопки карточек и /funnel в личке (через запятую)
+SALES_STAFF_IDS = {int(x) for x in os.getenv("SALES_STAFF_IDS", "").replace(" ", "").split(",") if x.lstrip("-").isdigit()}
 SALES_TG = os.getenv("SALES_TG", "conversion_wizard").lstrip("@")   # ник для кнопки «Написать Даниилу»
 SITE_URL = os.getenv("SITE_URL", "https://adrenalinegrowth.com").rstrip("/")
 # Окна для звонков: дни недели (1 = понедельник), часы, шаг, сколько дней вперёд показывать, минимум часов до звонка
@@ -83,7 +86,7 @@ FUNNEL_CHECK_SECONDS = int(os.getenv("FUNNEL_CHECK_SECONDS") or 60)
 # Курс для сравнения «потери vs абонплата» в калькуляторе
 USD_UAH = float(os.getenv("USD_UAH") or 41.5)
 # GA4 Measurement Protocol: события воронки бота в ту же аналитику, что и сайт (необязательно)
-# Значения по умолчанию — поток сайта adrenalinegrowth.com (секрет «demo-bot»). Переменные Railway их перекрывают.
-# Секрет даёт только право ОТПРАВЛЯТЬ события в этот поток; если репозиторий станет публичным — удалите его в GA4 и создайте новый.
-GA4_MEASUREMENT_ID = os.getenv("GA4_MEASUREMENT_ID", "")
+# ID потока сайта adrenalinegrowth.com публичный и указан по умолчанию.
+# Секрет НЕ хранится в коде: задаётся переменной GA4_API_SECRET в Railway. Без него события просто не отправляются.
+GA4_MEASUREMENT_ID = os.getenv("GA4_MEASUREMENT_ID", "G-SB7Y07ZZB7")
 GA4_API_SECRET = os.getenv("GA4_API_SECRET", "")

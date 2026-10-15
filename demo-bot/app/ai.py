@@ -229,6 +229,13 @@ NO_LEAD_NOTE = ("[Служебная пометка, клиент её не ви
                 "Если ты говорил о записи, которая уже есть в списке активных записей клиента, новую не создавай: повтори ответ.")
 
 
+NO_LEAD_FALLBACK = {
+    "ru": "Секунду, сверю запись с администратором и подтвержу здесь.",
+    "uk": "Секунду, звірю запис з адміністратором і підтверджу тут.",
+    "en": "One moment, I'll double-check the booking with the administrator and confirm here.",
+}
+
+
 def claims_booking(text: str) -> bool:
     """Ответ звучит как подтверждение записи."""
     return bool(_BOOKED_RE.search(text or ""))
@@ -304,6 +311,14 @@ async def ask(user_id: int, niche_key: str, text: str, image: bytes | None, acti
                     r["is_error"] = True
                 results.append(r)
             messages.append({"role": "user", "content": results})
+        if checked and not actions.lead_id and claims_booking(answer):
+            # второй раз подряд «записан» без записи: клиенту честно, владельцу — диалог для ручной записи
+            log.error("ИИ снова подтвердил запись без create_lead (user %s): %s", user_id, answer[:120])
+            answer = NO_LEAD_FALLBACK.get(i18n.resolve(profile), NO_LEAD_FALLBACK["ru"])
+            try:
+                await actions.ask_owner("ИИ не смог оформить запись", f"Сообщение клиента: {memo}"[:600])
+            except Exception:
+                log.exception("не удалось передать владельцу несостоявшуюся запись")
         if not answer:
             answer = "✅" if (actions.lead_id or actions.show_cabinet) else \
                 i18n.t(i18n.resolve(profile), "handover_ok")

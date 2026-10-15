@@ -58,6 +58,22 @@ def cbq(data, user):
     return Update(update_id=uid, callback_query=CallbackQuery(id=str(uid), from_user=user, chat_instance="c",
                                                               message=m, data=data))
 
+def gmsg(text, user, chat_id):
+    global uid
+    uid += 1
+    return Update(update_id=uid, message=Message(message_id=uid, date=datetime.now(),
+                                                 chat=Chat(id=chat_id, type="supergroup"), from_user=user, text=text))
+
+
+def gcbq(data, user, chat_id):
+    global uid
+    uid += 1
+    m = Message(message_id=uid, date=datetime.now(), chat=Chat(id=chat_id, type="supergroup"),
+                from_user=User(id=1, is_bot=True, first_name="b"), text="m")
+    return Update(update_id=uid, callback_query=CallbackQuery(id=str(uid), from_user=user, chat_instance="g",
+                                                              message=m, data=data))
+
+
 SALES = 777
 OWNER = 999
 V = User(id=50, is_bot=False, first_name="Олена", username="olena_salon", language_code="uk")
@@ -159,6 +175,13 @@ async def main():
     assert not any("Готово! Ви записані" in t for t in new) and any("№2" in t for t in new), new
     assert any("НЕ создана" in str(mm["content"]) for mm in ai.client.calls[1]["messages"])
     assert ai.claims_booking("Вы записаны на 16.10") and not ai.claims_booking("На какое время вас записать?")
+    # дважды «записані» без записи → клиенту честное «уточню», владельцу — передача
+    ai.client = ScriptedClient(say("Готово! Ви записані."), say("Готово! Ви записані на завтра."))
+    n_before = len(to(V.id))
+    await feed(msg("так", V))
+    new = [x["text"] or "" for x in to(V.id)[n_before:]]
+    assert any("звірю запис" in t for t in new) and not any("Ви записані" in t for t in new), new
+    assert to(OWNER, "ИИ не смог оформить запись")
 
     # 5. презентация: 6 экранов, калькулятор на 3-м
     await feed(cbq("fpn:0", V))
@@ -172,8 +195,8 @@ async def main():
     await feed(cbq("fc:c:1", V))                     # 500–1 500 ₴
     r = last(V.id)["text"]
     # 20/день × 30 = 600 → 15% = 90 → каждый пятый = 18 клиентов × 1000 ₴ = 18 000 ₴
-    assert "600" in r and "90" in r and "18 000" in r and "$120" in r and "MedPlatforma" in r, r
-    assert "у 3 рази менше" in r
+    assert "600" in r and "90" in r and "18 000" in r and "$160" in r and "MedPlatforma" in r, r
+    assert "у 2 рази менше" in r
     assert funnel.times_word(5, "uk") == "разів" and funnel.times_word(22, "uk") == "рази" and funnel.times_word(12, "ru") == "раз"
     p = await sales.get(V.id)
     assert p["volume"] == "1" and p["avg_check"] == "1" and "18 000" in p["calc"]
@@ -248,7 +271,7 @@ async def main():
     assert "20-минутный звонок" in w["text"] and ("📅 Выбрать время звонка", "fb:go") in buttons(w)
     assert (await sales.get(V2.id))["want_bot"] == 1 and to(SALES, "Хочет такого бота")
     sysprompt = "".join(b["text"] for b in ai.client.calls[0]["system"] if b["type"] == "text")
-    assert "сайта ADrenaline" in sysprompt and "$800" in sysprompt
+    assert "сайта ADrenaline" in sysprompt and "$800" in sysprompt and "$40" in sysprompt
 
     # 12. запись с телефоном: кнопка «поделиться номером»
     await feed(cbq("fb:go", V2))
@@ -312,6 +335,26 @@ async def main():
     assert "Воронка демо" in st and "Записались" in st and "сайт /ai-admin" in st
     await feed(msg("/funnel", V3))                    # посторонним — нет
     assert "Воронка демо" not in (last(V3.id)["text"] or "")
+
+    # 16b. отдельная группа «Заявки»: карточки и кнопки в группе, ИИ там молчит
+    GROUP, MATE = -100777, User(id=888, is_bot=False, first_name="Даня")
+    saved_sales = config.SALES_CHAT_ID
+    config.SALES_CHAT_ID = GROUP
+    ai.client = ScriptedClient(say("ИИ НЕ ДОЛЖЕН ОТВЕЧАТЬ В ГРУППЕ"))
+    await feed(gmsg("привет, кто сегодня на звонке?", MATE, GROUP))
+    assert not to(GROUP) and not ai.client.calls
+    await feed(gcbq(f"sc:ok:{c2['id']}", MATE, GROUP))           # участник группы может подтвердить
+    assert (await sales.get_call(c2["id"]))["status"] == "confirmed"
+    await feed(gcbq(f"sr:{V2.id}", MATE, GROUP))
+    fr = last(GROUP)
+    assert "Ответьте на это сообщение" in fr["text"] and type(fr["markup"]).__name__ == "ForceReply"
+    await feed(gmsg("Добрый день! Подтверждаю звонок", MATE, GROUP))
+    assert to(V2.id, "Подтверждаю звонок") and "Отправлено" in last(GROUP)["text"]
+    await feed(gmsg("/funnel", MATE, GROUP))
+    assert "Воронка демо" in last(GROUP)["text"]
+    await feed(cbq(f"sr:{V2.id}", MATE))                        # в личке посторонний — нельзя
+    assert not to(MATE.id, "Ответьте на это сообщение")
+    config.SALES_CHAT_ID = saved_sales
 
     # 17. FUNNEL=0: старое поведение демо (выбор языка, приветствие компании)
     config.FUNNEL_ENABLED = False
