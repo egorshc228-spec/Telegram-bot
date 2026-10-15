@@ -195,8 +195,8 @@ async def main():
     await feed(cbq("fc:c:1", V))                     # 500–1 500 ₴
     r = last(V.id)["text"]
     # 20/день × 30 = 600 → 15% = 90 → каждый пятый = 18 клиентов × 1000 ₴ = 18 000 ₴
-    assert "600" in r and "90" in r and "18 000" in r and "$120" in r and "MedPlatforma" in r, r
-    assert "у 3 рази менше" in r
+    assert "600" in r and "90" in r and "18 000" in r and "$160" in r and "MedPlatforma" in r, r
+    assert "у 2 рази менше" in r
     assert funnel.times_word(5, "uk") == "разів" and funnel.times_word(22, "uk") == "рази" and funnel.times_word(12, "ru") == "раз"
     p = await sales.get(V.id)
     assert p["volume"] == "1" and p["avg_check"] == "1" and "18 000" in p["calc"]
@@ -271,7 +271,7 @@ async def main():
     assert "20-минутный звонок" in w["text"] and ("📅 Выбрать время звонка", "fb:go") in buttons(w)
     assert (await sales.get(V2.id))["want_bot"] == 1 and to(SALES, "Хочет такого бота")
     sysprompt = "".join(b["text"] for b in ai.client.calls[0]["system"] if b["type"] == "text")
-    assert "сайта ADrenaline" in sysprompt and "$800" in sysprompt
+    assert "сайта ADrenaline" in sysprompt and "$800" in sysprompt and "$40" in sysprompt
 
     # 12. запись с телефоном: кнопка «поделиться номером»
     await feed(cbq("fb:go", V2))

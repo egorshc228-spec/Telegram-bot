@@ -377,7 +377,7 @@ async def calc(cb: CallbackQuery):
     month = VOL_MID[vol] * 30
     lost = round(month * MISS_SHARE)
     loss = lost * CLOSE_SHARE * CHECK_MID[j]
-    x = loss / (120 * config.USD_UAH)
+    x = loss / (160 * config.USD_UAH)
     ratio = ft(lang, "ratio", x=int(x), word=times_word(int(x), lang)) if x >= 2 else ""
     clients = round(lost * CLOSE_SHARE)
     await sales.update(cb.from_user.id, calc=f"~{lost} обращений/мес без быстрого ответа → ~{clients} клиентов "
