@@ -108,6 +108,69 @@ async def wa_status(s: dict):
         await scheduler.need_call(lead, f"WhatsApp не доставлен (код {codes or '—'}): скорее всего, у номера нет WhatsApp")
 
 
+# ================================================================ голосовой ИИ (ElevenLabs)
+
+def _tool_ok(request: web.Request) -> bool:
+    return bool(config.VOICE_TOOL_SECRET) and hmac.compare_digest(request.headers.get("X-Tool-Secret", ""),
+                                                                  config.VOICE_TOOL_SECRET)
+
+
+async def _tool_body(request: web.Request) -> dict:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+async def _tool_lead(body: dict) -> dict | None:
+    lid = str(body.get("lead_id") or "").strip()
+    return await db.get_lead(int(lid)) if lid.isdigit() else None
+
+
+NO_LEAD = "Не удалось найти заявку. Не называй окна и не упоминай технические детали: скажи, что Даниил перезвонит."
+
+
+async def voice_slots(request: web.Request):
+    """Инструмент агента get_free_slots: свободные окна текстом. Ответ всегда 200 — агенту нужна понятная подсказка."""
+    from . import voice
+    if not _tool_ok(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+    return web.json_response({"result": await voice.slots_text()})
+
+
+async def voice_book(request: web.Request):
+    """Инструмент агента book_call: {lead_id, datetime} → запись на звонок по телефону."""
+    from . import voice
+    if not _tool_ok(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+    body = await _tool_body(request)
+    lead = await _tool_lead(body)
+    if not lead:
+        return web.json_response({"result": NO_LEAD})
+    ok, text = await voice.book(lead, body.get("datetime"))
+    return web.json_response({"result": text, "ok": ok})
+
+
+async def voice_webhook(request: web.Request):
+    """Post-call webhook ElevenLabs: подпись ElevenLabs-Signature, итог звонка → группа «Заявки»."""
+    from . import elevenlabs, voice
+    raw = await request.read()
+    try:
+        event = elevenlabs.verify(raw, request.headers.get("ElevenLabs-Signature"), config.ELEVENLABS_WEBHOOK_SECRET)
+    except elevenlabs.BadSignature as e:
+        log.warning("вебхук ElevenLabs отклонён: %s", e)
+        return web.json_response({"ok": False, "error": "bad_signature"}, status=401)
+    agent_id = (event.get("data") or {}).get("agent_id")
+    if config.ELEVENLABS_AGENT_ID and agent_id and agent_id != config.ELEVENLABS_AGENT_ID:
+        return web.json_response({"ok": True, "skipped": "other_agent"})
+    result = elevenlabs.to_result(event)
+    if result is None or not result.get("conversation_id"):
+        return web.json_response({"ok": True, "skipped": event.get("type")})
+    _bg(voice.on_result(result))                    # ElevenLabs ждёт быстрый 200, обработка — в фоне
+    return web.json_response({"ok": True})
+
+
 # ================================================================ приложение
 
 async def health(_):
@@ -115,9 +178,12 @@ async def health(_):
 
 
 def app() -> web.Application:
-    a = web.Application(client_max_size=256 * 1024)
+    a = web.Application(client_max_size=4 * 1024 * 1024)     # итог звонка с текстом разговора бывает большим
     a.router.add_post("/api/lead", api_lead)
     a.router.add_get("/wa/webhook", wa_verify)
     a.router.add_post("/wa/webhook", wa_hook)
     a.router.add_get("/health", health)
+    a.router.add_post("/voice/tools/slots", voice_slots)
+    a.router.add_post("/voice/tools/book", voice_book)
+    a.router.add_post("/voice/webhook", voice_webhook)
     return a

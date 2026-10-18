@@ -74,6 +74,25 @@ NO_REPLY_MIN = int(os.getenv("NO_REPLY_MIN") or 20)       # нет ответа 
 NUDGE_HOURS = int(os.getenv("NUDGE_HOURS") or 20)          # общался, но не записался → одно напоминание
 CONTACT_HOURS = os.getenv("CONTACT_HOURS", "09:00-20:00")  # сами пишем и просим позвонить только в эти часы
 CHECK_SECONDS = int(os.getenv("CHECK_SECONDS") or 30)
+# Бот написал в чате, человек молчит SILENCE_CALL_MIN минут → звонок (один раз на лида, только в CONTACT_HOURS).
+# Пока голосового ИИ нет — карточка «☎️ Позвонить» в группу; без номера бот просит номер. 0 = выключить
+SILENCE_CALL_MIN = int(os.getenv("SILENCE_CALL_MIN") if os.getenv("SILENCE_CALL_MIN") is not None else 30)
+
+# ---- Голосовой ИИ (ElevenLabs, номер Zadarma). По умолчанию выключен: VOICE_CALLS=0 — вместо звонка карточка ----
+# Включён: когда пора звонить (молчит после сообщения бота, нет ответа в WhatsApp, нет WhatsApp), звонит агент
+# ElevenLabs. Он сам смотрит свободные окна и записывает на звонок через этого бота; итог приходит в группу.
+VOICE_CALLS = os.getenv("VOICE_CALLS", "0").strip().lower() not in ("0", "false", "no", "")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")                 # ключ API (аккаунт компании)
+ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID", "")               # id агента «ADrenaline · обзвон заявок»
+ELEVENLABS_PHONE_NUMBER_ID = os.getenv("ELEVENLABS_PHONE_NUMBER_ID", "") # id номера Zadarma, импортированного в ElevenLabs
+ELEVENLABS_WEBHOOK_SECRET = os.getenv("ELEVENLABS_WEBHOOK_SECRET", "")   # секрет post-call webhook (подпись итога звонка)
+ELEVENLABS_API_URL = os.getenv("ELEVENLABS_API_URL", "https://api.elevenlabs.io").rstrip("/")
+VOICE_TOOL_SECRET = os.getenv("VOICE_TOOL_SECRET", "")    # заголовок X-Tool-Secret в инструментах агента
+VOICE_LANGUAGE_OVERRIDE = os.getenv("VOICE_LANGUAGE_OVERRIDE", "0") == "1"   # 1 — лидам с /ru агент начинает по-русски
+VOICE_RINGING_SECS = int(os.getenv("VOICE_RINGING_SECS") or 30)              # сколько ждать, пока возьмут трубку
+VOICE_MAX_ATTEMPTS = int(os.getenv("VOICE_MAX_ATTEMPTS") or 2)               # звонок + один повтор (гайд)
+VOICE_RETRY_MIN = int(os.getenv("VOICE_RETRY_MIN") or 30)                    # повтор, если не дозвонились
+VOICE_RESULT_TIMEOUT_MIN = int(os.getenv("VOICE_RESULT_TIMEOUT_MIN") or 20)  # итог не пришёл — «не дозвонились»
 
 # ---- GA4 Measurement Protocol (необязательно): call_booked к тому же посетителю сайта ----
 GA4_MEASUREMENT_ID = os.getenv("GA4_MEASUREMENT_ID", "G-SB7Y07ZZB7")
@@ -86,3 +105,16 @@ def wa_enabled() -> bool:
 
 def gcal_enabled() -> bool:
     return bool(GOOGLE_CALENDAR_ID and GOOGLE_SERVICE_ACCOUNT.get("private_key"))
+
+
+VOICE_REQUIRED = ("ELEVENLABS_API_KEY", "ELEVENLABS_AGENT_ID", "ELEVENLABS_PHONE_NUMBER_ID",
+                  "ELEVENLABS_WEBHOOK_SECRET", "VOICE_TOOL_SECRET")
+
+
+def voice_missing() -> list[str]:
+    """Каких переменных не хватает голосовому ИИ. Без секретов агент не смог бы записать и прислать итог."""
+    return [k for k in VOICE_REQUIRED if not globals().get(k)]
+
+
+def voice_enabled() -> bool:
+    return bool(VOICE_CALLS) and not voice_missing()

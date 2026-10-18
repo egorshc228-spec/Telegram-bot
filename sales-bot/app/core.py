@@ -204,6 +204,14 @@ async def incoming(lead: dict, text: str):
     lead = await db.get_lead(lead["id"])
     await note(lead, f"💬 {esc(text[:500])}", silent=True)
     pend = lead.get("pending") or ""
+    if pend == "callphone":                               # бот просил номер, чтобы позвонить молчащему лиду
+        ph = normalize_phone(text)
+        await db.update_lead(lead["id"], pending=None, **({"phone": ph} if ph else {}))
+        lead = await db.get_lead(lead["id"])
+        if ph:
+            from . import scheduler
+            await scheduler.call_now(lead, "оставил номер, просит набрать")
+            return await send(lead, t(lang, "call_phone_ok"))
     if pend.startswith("phone:"):
         ph = normalize_phone(text)
         if not ph:

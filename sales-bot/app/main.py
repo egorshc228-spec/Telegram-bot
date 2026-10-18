@@ -24,6 +24,11 @@ async def main():
     logging.info("WhatsApp: %s · Google Calendar: %s · автоматика: %s",
                  "вкл" if config.wa_enabled() else "выкл", "вкл" if config.gcal_enabled() else "выкл",
                  "вкл" if config.AUTOMATION else "выкл")
+    logging.info("Молчит после сообщения бота: %s · голосовой ИИ: %s",
+                 f"звонок через {config.SILENCE_CALL_MIN} мин" if config.SILENCE_CALL_MIN else "выкл",
+                 "вкл (ElevenLabs)" if config.voice_enabled() else "выкл (карточка «Позвонить» в группу)")
+    if config.VOICE_CALLS and config.voice_missing():
+        logging.warning("VOICE_CALLS=1, но голосовой ИИ выключен: не заданы %s", ", ".join(config.voice_missing()))
     await db.init()
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     core.bot = bot

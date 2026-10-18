@@ -20,6 +20,9 @@ LEAD_COLS = {
     "next_at": "TEXT", "last_in": "TEXT", "last_out": "TEXT", "nudged": "INTEGER DEFAULT 0",
     "card_id": "INTEGER", "assignee": "TEXT", "call_id": "INTEGER", "biz": "TEXT", "request": "TEXT",
     "ai_day": "TEXT", "ai_count": "INTEGER DEFAULT 0", "pending": "TEXT",
+    "silence_done": "INTEGER DEFAULT 0",   # звонок/карточка «молчит после сообщения бота» уже были
+    # голосовой ИИ: id текущего звонка в ElevenLabs, попыток, когда звонили, когда проверить (сторож итога / повтор)
+    "voice_conv": "TEXT", "voice_tries": "INTEGER DEFAULT 0", "voice_at": "TEXT", "voice_next_at": "TEXT",
 }
 CALL_COLS = {
     "lead_id": "INTEGER", "at": "TEXT", "format": "TEXT", "phone": "TEXT", "status": "TEXT DEFAULT 'booked'",
@@ -50,6 +53,7 @@ async def init():
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
                 except Exception:
                     pass
+        await db.execute("CREATE TABLE IF NOT EXISTS voice_events(conv TEXT PRIMARY KEY, ts TEXT)")
         await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS leads_token ON leads(token)")
         await db.commit()
     _ready = True
@@ -110,6 +114,25 @@ async def lead_by_wa(wa_id: str) -> dict | None:
 
 async def lead_by_phone(phone: str) -> dict | None:
     return await one("SELECT * FROM leads WHERE phone=? ORDER BY id DESC LIMIT 1", (phone,))
+
+
+async def lead_by_voice_conv(conv: str) -> dict | None:
+    if not conv:
+        return None
+    return await one("SELECT * FROM leads WHERE voice_conv=? ORDER BY id DESC LIMIT 1", (conv,))
+
+
+async def voice_due(at: datetime) -> list[dict]:
+    return await rows("SELECT * FROM leads WHERE voice_next_at IS NOT NULL AND voice_next_at<=?", (iso(at),))
+
+
+async def voice_event_seen(conv: str) -> bool:
+    """Итог этого звонка уже обработан (ElevenLabs может прислать вебхук повторно)."""
+    return bool(await one("SELECT conv FROM voice_events WHERE conv=?", (conv,)))
+
+
+async def voice_event_mark(conv: str):
+    await exec_("INSERT OR IGNORE INTO voice_events(conv, ts) VALUES(?, ?)", (conv, iso(now())))
 
 
 async def update_lead(lead_id: int, **fields):

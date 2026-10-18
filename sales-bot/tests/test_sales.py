@@ -14,6 +14,7 @@ os.environ.update({
     "WA_APP_SECRET": "appsec", "ANTHROPIC_API_KEY": "k", "SALES_DAYS": "1,2,3,4,5,6,7", "SALES_HOURS": "10:00-19:00",
     "CONTACT_HOURS": "00:00-23:59", "MEET_URL": "https://meet.google.com/abc-defg-hij", "GA4_API_SECRET": "",
     "GOOGLE_CALENDAR_ID": "dan@example.com", "BOT_USERNAME": "adr_sales_bot",
+    "SILENCE_CALL_MIN": "0",                     # «молчит 30 мин» проверяется в tests/test_silence.py
 })
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
